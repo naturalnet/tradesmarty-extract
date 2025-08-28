@@ -1,1 +1,10 @@
-
+slug: admirals
+base: https://admiralmarkets.com
+regions:
+- fca
+- cysec
+- asic
+- fsca
+- jsc
+- cma
+- fsa
