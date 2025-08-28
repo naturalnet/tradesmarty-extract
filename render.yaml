@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: ts-extract-worker
+    env: node
+    plan: starter
+    region: frankfurt    # blizu tebe; može i eu-central
+    branch: main
+    autoDeploy: true
+
+    buildCommand: npm install
+    startCommand: npm start
+
+    envVars:
+      - key: TSBAR_KEY
+        sync: false         # postavi vrednost u Render UI (Secrets)
+      - key: NODE_VERSION
+        value: 20
+
+    healthCheckPath: /health
+    # Optional:
+    # healthCheckTimeout: 100
+    # numInstances: 1
