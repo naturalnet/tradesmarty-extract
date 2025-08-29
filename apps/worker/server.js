@@ -8,6 +8,7 @@ import compression from 'compression';
 import morgan from 'morgan';
 
 import runRouter from './src/routes/run.js';
+import jobsRouter from './src/routes/jobs.js'; // ⬅️ MOUNTUJEMO /jobs
 
 const app = express();
 const srv = http.createServer(app);
@@ -27,11 +28,9 @@ app.use(compression());
 app.use(morgan('tiny'));
 
 // Health bez auth-a
-app.get('/health', (req, res) => {
-  res.json({ ok: true, uptime: process.uptime() });
-});
+app.get('/health', (_req, res) => res.json({ ok: true, uptime: process.uptime() }));
 
-// Helper: izvuči ključ iz headera ili query parametara (case-insensitive)
+// Robustan auth: header ili ?key=
 function getKeyFromReq(req) {
   const h = req.headers || {};
   const headerKey =
@@ -43,36 +42,31 @@ function getKeyFromReq(req) {
       if (/^bearer\s+/i.test(v)) return v.replace(/^bearer\s+/i, '').trim();
       return v;
     })();
-
   if (headerKey) return headerKey;
 
-  let queryKey = '';
   for (const k of Object.keys(req.query || {})) {
     const low = k.toLowerCase();
     if (low === 'key' || low === 'tsbar_key' || low === 'api_key') {
-      queryKey = String(req.query[k] ?? '').trim();
-      if (queryKey) break;
+      const q = String(req.query[k] ?? '').trim();
+      if (q) return q;
     }
   }
-  return queryKey;
+  return '';
 }
 
-// Auth (dozvoli OPTIONS i /health)
 app.use((req, res, next) => {
   if (!AUTH_ON) return next();
   if (req.method === 'OPTIONS') return next();
   if (req.path === '/health') return next();
-
   const provided = getKeyFromReq(req);
   if (provided && provided === KEY) return next();
-
   return res.status(401).json({ ok:false, error:'unauthorized' });
 });
 
-// Rute
+// Mount rute
 app.use('/', runRouter);
+app.use('/', jobsRouter); // ⬅️ OVDE SE DODAJE /jobs
 
-// Start
 srv.listen(PORT, () => {
   console.log(`[worker] listening on :${PORT}`);
 });
