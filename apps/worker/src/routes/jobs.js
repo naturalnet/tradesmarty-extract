@@ -5,9 +5,14 @@ import { orchestrate } from '../orchestrator.js';
 
 const router = Router();
 
-function writeSSE(res, dataObj, eventName) {
-  if (eventName) res.write(`event: ${eventName}\n`);
-  res.write(`data: ${JSON.stringify(dataObj)}\n\n`);
+function wantsSSE(req) {
+  const a = String(req.headers['accept'] || '');
+  const q = String((req.query?.stream ?? req.query?.sse ?? '')).toLowerCase();
+  return /text\/event-stream/i.test(a) || q === '1' || q === 'true';
+}
+function writeSSE(res, payload, event) {
+  if (event) res.write(`event: ${event}\n`);
+  res.write(`data: ${JSON.stringify(payload)}\n\n`);
 }
 
 function guessBrokerFromParams(p = {}) {
@@ -20,7 +25,7 @@ function guessBrokerFromParams(p = {}) {
       if (first.includes('icmarkets')) return 'icmarkets';
       if (first.includes('xtb')) return 'xtb';
       return first;
-    } catch (_) {}
+    } catch {}
   }
   const brand = String(p.brand || p.broker_name || p.name || '').toLowerCase();
   if (brand) {
@@ -30,7 +35,6 @@ function guessBrokerFromParams(p = {}) {
   const slug = String(p.broker || p.broker_slug || p.slug || '').toLowerCase();
   return slug || '';
 }
-
 function guessSectionFromParams(p = {}) {
   const sec = String(p.section || p.sec || p.s || '').toLowerCase();
   if (sec) return sec;
@@ -43,54 +47,70 @@ function guessSectionFromParams(p = {}) {
   if (mode.includes('research')) return 'research_tools';
   if (mode.includes('education')) return 'education';
   if (mode.includes('support')) return 'customer_support';
-  // dashboard "all" – za MVP krećemo od safety
   const sections = String(p.sections || '').toLowerCase();
   if (sections === 'all' || sections.includes('safety')) return 'safety';
   return 'safety';
+}
+
+async function runJobOnce(params) {
+  const broker  = (params.broker && String(params.broker).toLowerCase()) || guessBrokerFromParams(params);
+  const section = (params.section && String(params.section).toLowerCase()) || guessSectionFromParams(params);
+  const debug   = String(params.debug || '') === '1';
+
+  if (!broker || !section) {
+    return { ok:false, error:'missing_params', hint:'Provide broker & section or homepage' };
+  }
+  const result = await orchestrate({ broker, section, debug });
+  if (!result || result.ok === false) return { ok:false, error:'not_supported', broker, section };
+  return { ok:true, broker, section, ...result };
 }
 
 router.get('/jobs/:id', async (req, res) => {
   const { id } = req.params;
   const job = Jobs.get(id);
 
-  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
-  res.setHeader('Cache-Control', 'no-cache, no-transform');
-  res.setHeader('Connection', 'keep-alive');
-
   if (!job) {
-    writeSSE(res, { ok:false, error:'job_not_found', id });
-    return res.end();
+    if (wantsSSE(req)) {
+      res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+      res.setHeader('Cache-Control', 'no-cache, no-transform');
+      res.setHeader('Connection', 'keep-alive');
+      writeSSE(res, { ok:false, error:'job_not_found', id }, 'done');
+      return res.end();
+    }
+    return res.status(404).json({ ok:false, error:'job_not_found', id });
   }
 
   const params = job.params || {};
-  const broker  = (params.broker && String(params.broker).toLowerCase()) || guessBrokerFromParams(params);
-  const section = (params.section && String(params.section).toLowerCase()) || guessSectionFromParams(params);
-  const debug   = String(params.debug || '') === '1';
 
-  writeSSE(res, { status:'started', id, broker, section }, 'status');
+  // === SSE MODE ===
+  if (wantsSSE(req)) {
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
 
-  if (!broker || !section) {
-    writeSSE(res, { ok:false, error:'missing_params', hint:'Provide broker & section or homepage' }, 'done');
-    return res.end();
-  }
-
-  try {
-    const result = await orchestrate({ broker, section, debug });
-
-    if (!result || result.ok === false) {
-      writeSSE(res, { ok:false, error:'not_supported', broker, section }, 'done');
+    writeSSE(res, { status:'started', id }, 'status');
+    try {
+      const out = await runJobOnce(params);
+      if (!out.ok) {
+        writeSSE(res, out, 'done');
+        return res.end();
+      }
+      writeSSE(res, { level:'info', message:`Extracted ${out.broker}/${out.section}` }, 'log');
+      writeSSE(res, out, 'done');
+      return res.end();
+    } catch (err) {
+      writeSSE(res, { ok:false, error:'internal_error', message:String(err?.message || err) }, 'done');
       return res.end();
     }
+  }
 
-    // Informacije tokom rada (po želji)
-    writeSSE(res, { level:'info', message:`Extracted ${broker}/${section}` }, 'log');
-
-    // Finalni rezultat
-    writeSSE(res, { ok:true, broker, section, ...result }, 'done');
-    return res.end();
+  // === JSON POLLING MODE ===
+  try {
+    const out = await runJobOnce(params);
+    if (!out.ok) return res.status(400).json(out);
+    return res.json(out);
   } catch (err) {
-    writeSSE(res, { ok:false, error:'internal_error', message:String(err?.message || err) }, 'done');
-    return res.end();
+    return res.status(500).json({ ok:false, error:'internal_error', message:String(err?.message || err) });
   }
 });
 
