@@ -1,3 +1,4 @@
+// apps/worker/server.js
 try { await import('dotenv/config'); } catch (_) {}
 
 import express from 'express';
@@ -23,42 +24,32 @@ app.use(express.json({ limit: '1mb' }));
 app.use(compression());
 app.use(morgan('tiny'));
 
-// Health
-app.get('/health', (req, res) => res.json({ ok:true, uptime: process.uptime() }));
-
-// Debug spisak ruta
-app.get('/_routes', (req, res) => {
-  const stack = app._router?.stack || [];
-  const routes = [];
-  stack.forEach(l => {
-    if (l.route && l.route.path) {
-      routes.push(Object.keys(l.route.methods).map(m => m.toUpperCase()).join(',') + ' ' + l.route.path);
-    } else if (l.name === 'router' && l.handle?.stack) {
-      l.handle.stack.forEach(s => {
-        if (s.route?.path) {
-          routes.push(Object.keys(s.route.methods).map(m => m.toUpperCase()).join(',') + ' ' + s.route.path);
-        }
-      });
-    }
-  });
-  res.json({ ok:true, routes });
+// Health bez auth-a
+app.get('/health', (req, res) => {
+  res.json({ ok: true, uptime: process.uptime() });
 });
 
-// Auth guard (osim /health i /_routes)
+// Auth guard (dozvoli /health i /__routes bez ključa)
 app.use((req, res, next) => {
   if (!AUTH_ON) return next();
-  if (req.path === '/health' || req.path === '/_routes') return next();
-  const k = (req.headers['x-tsbar-key'] || req.query.key || '').toString().trim();
+  if (req.path === '/health' || req.path === '/__routes') return next();
+  const hdr = (req.headers['x-tsbar-key'] || '').toString().trim();
+  const qk  = (req.query?.key || '').toString().trim();
+  const k = hdr || qk;
   if (k && k === KEY) return next();
   res.status(401).json({ ok:false, error:'unauthorized' });
 });
 
-// Mount
+// Mount rute
 app.use('/', runRouter);
 app.use('/', jobsRouter);
 app.use('/', regulatorsRouter);
 
-// Start
+// 404 JSON
+app.use((req, res) => {
+  res.status(404).json({ ok:false, error:'not_found' });
+});
+
 srv.listen(PORT, () => {
   console.log(`[worker] listening on :${PORT}`);
 });
