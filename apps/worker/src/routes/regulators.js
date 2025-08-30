@@ -1,13 +1,22 @@
+// apps/worker/src/routes/regulators.js
 import { Router } from 'express';
 
 const router = Router();
 
-// Za sada samo “not implemented”, ali HTTP 200 da UI ne baca 404 HTML.
+/**
+ * GET /regulators
+ * Minimal stub da WP UI ne dobija 404. Kasnije ovde možemo spajati
+ * brokers/*/config.yaml ili izvučene regulatorne entitete iz “safety” sekcije.
+ */
 router.get('/regulators', (req, res) => {
+  const echo = String(req.query.echo || '');
+  if (echo) {
+    return res.json({ ok:true, echo, hint:'stub endpoint alive' });
+  }
   res.json({
     ok: true,
     items: [],
-    note: 'Regulators endpoint placeholder — implementira se kada dodamo sections/regulators extractor.'
+    message: 'regulators_stub',
   });
 });
 
