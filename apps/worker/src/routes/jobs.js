@@ -10,6 +10,7 @@ function wantsSSE(req) {
   const q = String((req.query?.stream ?? req.query?.sse ?? '')).toLowerCase();
   return /text\/event-stream/i.test(a) || q === '1' || q === 'true';
 }
+
 function writeSSE(res, payload, event) {
   if (event) res.write(`event: ${event}\n`);
   res.write(`data: ${JSON.stringify(payload)}\n\n`);
@@ -35,6 +36,7 @@ function guessBrokerFromParams(p = {}) {
   const slug = String(p.broker || p.broker_slug || p.slug || '').toLowerCase();
   return slug || '';
 }
+
 function guessSectionFromParams(p = {}) {
   const sec = String(p.section || p.sec || p.s || '').toLowerCase();
   if (sec) return sec;
@@ -52,7 +54,7 @@ function guessSectionFromParams(p = {}) {
   return 'safety';
 }
 
-async function runJobOnce(params) {
+async function runJobOnce(id, params) {
   const broker  = (params.broker && String(params.broker).toLowerCase()) || guessBrokerFromParams(params);
   const section = (params.section && String(params.section).toLowerCase()) || guessSectionFromParams(params);
   const debug   = String(params.debug || '') === '1';
@@ -60,8 +62,10 @@ async function runJobOnce(params) {
   if (!broker || !section) {
     return { ok:false, error:'missing_params', hint:'Provide broker & section or homepage' };
   }
+
   const result = await orchestrate({ broker, section, debug });
   if (!result || result.ok === false) return { ok:false, error:'not_supported', broker, section };
+
   return { ok:true, broker, section, ...result };
 }
 
@@ -89,12 +93,14 @@ router.get('/jobs/:id', async (req, res) => {
     res.setHeader('Connection', 'keep-alive');
 
     writeSSE(res, { status:'started', id }, 'status');
+
     try {
-      const out = await runJobOnce(params);
+      const out = await runJobOnce(id, params);
       if (!out.ok) {
         writeSSE(res, out, 'done');
         return res.end();
       }
+      // (opciono) neki log
       writeSSE(res, { level:'info', message:`Extracted ${out.broker}/${out.section}` }, 'log');
       writeSSE(res, out, 'done');
       return res.end();
@@ -106,7 +112,7 @@ router.get('/jobs/:id', async (req, res) => {
 
   // === JSON POLLING MODE ===
   try {
-    const out = await runJobOnce(params);
+    const out = await runJobOnce(id, params);
     if (!out.ok) return res.status(400).json(out);
     return res.json(out);
   } catch (err) {
