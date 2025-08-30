@@ -1,7 +1,7 @@
+// apps/worker/src/routes/jobs.js
 import { Router } from 'express';
+import { Jobs } from './run.js';
 import { orchestrate } from '../orchestrator.js';
-
-export const Jobs = new Map(); // minimalan in-mem store
 
 const router = Router();
 
@@ -17,10 +17,10 @@ function writeSSE(res, payload, event) {
 }
 
 function guessBrokerFromParams(p = {}) {
-  const urlish = String(p.homepage || p.url || '').trim();
+  const urlish = String(p.homepage || p.url || p.home || '').trim();
   if (urlish) {
     try {
-      const host = new URL(urlish).hostname.toLowerCase().replace(/^www\./,'');
+      const host = new URL(urlish).hostname.toLowerCase().replace(/^www\./, '');
       const first = host.split('.')[0];
       if (['admiralmarkets','admirals','admiral'].includes(first)) return 'admirals';
       if (first.includes('icmarkets')) return 'icmarkets';
@@ -54,7 +54,7 @@ function guessSectionFromParams(p = {}) {
   return 'safety';
 }
 
-async function runJobOnce(id, params) {
+async function runOnce(params) {
   const broker  = (params.broker && String(params.broker).toLowerCase()) || guessBrokerFromParams(params);
   const section = (params.section && String(params.section).toLowerCase()) || guessSectionFromParams(params);
   const debug   = String(params.debug || '') === '1';
@@ -62,10 +62,8 @@ async function runJobOnce(id, params) {
   if (!broker || !section) {
     return { ok:false, error:'missing_params', hint:'Provide broker & section or homepage' };
   }
-
   const result = await orchestrate({ broker, section, debug });
   if (!result || result.ok === false) return { ok:false, error:'not_supported', broker, section };
-
   return { ok:true, broker, section, ...result };
 }
 
@@ -75,9 +73,9 @@ router.get('/jobs/:id', async (req, res) => {
 
   if (!job) {
     if (wantsSSE(req)) {
-      res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
-      res.setHeader('Cache-Control', 'no-cache, no-transform');
-      res.setHeader('Connection', 'keep-alive');
+      res.setHeader('Content-Type','text/event-stream; charset=utf-8');
+      res.setHeader('Cache-Control','no-cache, no-transform');
+      res.setHeader('Connection','keep-alive');
       writeSSE(res, { ok:false, error:'job_not_found', id }, 'done');
       return res.end();
     }
@@ -87,15 +85,16 @@ router.get('/jobs/:id', async (req, res) => {
   const params = job.params || {};
 
   if (wantsSSE(req)) {
-    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
-    res.setHeader('Cache-Control', 'no-cache, no-transform');
-    res.setHeader('Connection', 'keep-alive');
-
+    res.setHeader('Content-Type','text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control','no-cache, no-transform');
+    res.setHeader('Connection','keep-alive');
     writeSSE(res, { status:'started', id }, 'status');
-
     try {
-      const out = await runJobOnce(id, params);
-      if (!out.ok) { writeSSE(res, out, 'done'); return res.end(); }
+      const out = await runOnce(params);
+      if (!out.ok) {
+        writeSSE(res, out, 'done');
+        return res.end();
+      }
       writeSSE(res, { level:'info', message:`Extracted ${out.broker}/${out.section}` }, 'log');
       writeSSE(res, out, 'done');
       return res.end();
@@ -106,7 +105,7 @@ router.get('/jobs/:id', async (req, res) => {
   }
 
   try {
-    const out = await runJobOnce(id, params);
+    const out = await runOnce(params);
     if (!out.ok) return res.status(400).json(out);
     return res.json(out);
   } catch (err) {
