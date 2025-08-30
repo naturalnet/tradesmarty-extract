@@ -3,11 +3,12 @@ import { loadCheerio, toAbs, sameSite } from './http.js';
 
 const DENY_EXT = /\.(jpg|jpeg|png|webp|gif|svg|ico|css|js|zip|rar|7z|mp4|mp3|wav)(\?|$)/i;
 
-// prošireni tokeni u path-u
+// prošireni tokeni u path-u (uključujući download/forms/docs)
 const PATH_TOKENS = [
-  'legal','regulation','regulations','regulatory','documents','document',
-  'policy','policies','risk','disclosure','terms','conditions','agreement',
-  'client','complaint','complaints','privacy','cookie','kyc','aml','docs','legal-information'
+  'legal','legal-information','regulation','regulations','regulatory',
+  'documents','document','docs','download','downloads','forms','resources','support',
+  'policy','policies','privacy','cookie','cookies','complaint','complaints',
+  'risk','disclosure','terms','conditions','agreement','client','kyc','aml'
 ];
 
 export function extractLinks($, baseUrl) {
@@ -23,7 +24,7 @@ export function extractLinks($, baseUrl) {
 }
 
 export async function crawlDomainSeeds({
-  origin,           // npr https://quadcodemarkets.com
+  origin,           // npr https://wocom.com.hk
   startUrls,
   keywordPatterns,
   maxPages = 60
@@ -37,7 +38,7 @@ export async function crawlDomainSeeds({
     if (seen.has(u)) continue;
     seen.add(u);
 
-    // pratimo samo isti sajt (takođe i poddomene)
+    // prate se isti sajt + poddomene
     if (!sameSite(u, origin)) continue;
 
     let $;
@@ -61,10 +62,12 @@ export async function crawlDomainSeeds({
     const pdfCount = links.filter(h => /\.pdf(\?|$)/i.test(h)).length;
     score += Math.min(pdfCount * 2, 10);
 
-    // 4) “client/terms/agreement” u anchor textu
+    // 4) anchor text indikatori
     $('a[href]').each((_i, a) => {
       const txt = String($(a).text() || '').toLowerCase();
-      if (/(client|agreement|terms|risk|privacy|policy|disclosure)/i.test(txt)) score += 1;
+      if (/(client|agreement|terms|risk|privacy|policy|disclosure|download|form)/i.test(txt)) score += 1;
+      // kineski indikatori
+      if (/(協議|协议|條款|条款|風險|风险|披露|私隱|隐私|免責|免责声明|下載|下载)/.test(txt)) score += 2;
     });
 
     candidates.set(u, (candidates.get(u) || 0) + score);
