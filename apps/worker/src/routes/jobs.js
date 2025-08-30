@@ -1,7 +1,7 @@
-// apps/worker/src/routes/jobs.js
 import { Router } from 'express';
-import { Jobs } from './run.js';
 import { orchestrate } from '../orchestrator.js';
+
+export const Jobs = new Map(); // minimalan in-mem store
 
 const router = Router();
 
@@ -54,33 +54,16 @@ function guessSectionFromParams(p = {}) {
   return 'safety';
 }
 
-function parseSeeds(v) {
-  if (!v) return [];
-  if (Array.isArray(v)) return v.map(String).map(s => s.trim()).filter(Boolean);
-  // CSV string
-  return String(v)
-    .split(',')
-    .map(s => s.trim())
-    .filter(Boolean);
-}
-
 async function runJobOnce(id, params) {
-  const broker   = (params.broker && String(params.broker).toLowerCase()) || guessBrokerFromParams(params);
-  const section  = (params.section && String(params.section).toLowerCase()) || guessSectionFromParams(params);
-  const debug    = String(params.debug || '') === '1';
-  const mode     = String(params.mode || '').toLowerCase();              // npr. "deep"
-  const ingest   =
-    params.ingest === true ||
-    String(params.ingest || '') === '1' ||
-    mode === 'deep';                                                     // Discover + Ingest (deep)
-  const homepage = params.homepage || params.url || '';
-  const seeds    = parseSeeds(params.seeds);
+  const broker  = (params.broker && String(params.broker).toLowerCase()) || guessBrokerFromParams(params);
+  const section = (params.section && String(params.section).toLowerCase()) || guessSectionFromParams(params);
+  const debug   = String(params.debug || '') === '1';
 
   if (!broker || !section) {
     return { ok:false, error:'missing_params', hint:'Provide broker & section or homepage' };
   }
 
-  const result = await orchestrate({ broker, section, debug, mode, ingest, homepage, seeds });
+  const result = await orchestrate({ broker, section, debug });
   if (!result || result.ok === false) return { ok:false, error:'not_supported', broker, section };
 
   return { ok:true, broker, section, ...result };
@@ -103,7 +86,6 @@ router.get('/jobs/:id', async (req, res) => {
 
   const params = job.params || {};
 
-  // === SSE MODE ===
   if (wantsSSE(req)) {
     res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
     res.setHeader('Cache-Control', 'no-cache, no-transform');
@@ -113,10 +95,7 @@ router.get('/jobs/:id', async (req, res) => {
 
     try {
       const out = await runJobOnce(id, params);
-      if (!out.ok) {
-        writeSSE(res, out, 'done');
-        return res.end();
-      }
+      if (!out.ok) { writeSSE(res, out, 'done'); return res.end(); }
       writeSSE(res, { level:'info', message:`Extracted ${out.broker}/${out.section}` }, 'log');
       writeSSE(res, out, 'done');
       return res.end();
@@ -126,7 +105,6 @@ router.get('/jobs/:id', async (req, res) => {
     }
   }
 
-  // === JSON POLLING MODE ===
   try {
     const out = await runJobOnce(id, params);
     if (!out.ok) return res.status(400).json(out);
