@@ -1,4 +1,3 @@
-// apps/worker/server.js
 try { await import('dotenv/config'); } catch (_) {}
 
 import express from 'express';
@@ -8,7 +7,8 @@ import compression from 'compression';
 import morgan from 'morgan';
 
 import runRouter from './src/routes/run.js';
-import jobsRouter from './src/routes/jobs.js'; // ⬅️ MOUNTUJEMO /jobs
+import jobsRouter from './src/routes/jobs.js';
+import regulatorsRouter from './src/routes/regulators.js';
 
 const app = express();
 const srv = http.createServer(app);
@@ -18,55 +18,47 @@ const KEY  = (process.env.TSBAR_KEY || '').trim();
 const AUTH_ON = KEY.length > 0;
 
 app.disable('x-powered-by');
-app.use(cors({
-  origin: true,
-  credentials: false,
-  allowedHeaders: ['Content-Type','x-tsbar-key','x-api-key','authorization'],
-}));
+app.use(cors({ origin: true, credentials: false, allowedHeaders: ['Content-Type','x-tsbar-key'] }));
 app.use(express.json({ limit: '1mb' }));
 app.use(compression());
 app.use(morgan('tiny'));
 
-// Health bez auth-a
-app.get('/health', (_req, res) => res.json({ ok: true, uptime: process.uptime() }));
+// Health
+app.get('/health', (req, res) => res.json({ ok:true, uptime: process.uptime() }));
 
-// Robustan auth: header ili ?key=
-function getKeyFromReq(req) {
-  const h = req.headers || {};
-  const headerKey =
-    (h['x-tsbar-key'] && String(h['x-tsbar-key']).trim()) ||
-    (h['x-api-key']  && String(h['x-api-key']).trim()) ||
-    (() => {
-      const v = h['authorization'] && String(h['authorization']).trim();
-      if (!v) return '';
-      if (/^bearer\s+/i.test(v)) return v.replace(/^bearer\s+/i, '').trim();
-      return v;
-    })();
-  if (headerKey) return headerKey;
-
-  for (const k of Object.keys(req.query || {})) {
-    const low = k.toLowerCase();
-    if (low === 'key' || low === 'tsbar_key' || low === 'api_key') {
-      const q = String(req.query[k] ?? '').trim();
-      if (q) return q;
+// Debug spisak ruta
+app.get('/_routes', (req, res) => {
+  const stack = app._router?.stack || [];
+  const routes = [];
+  stack.forEach(l => {
+    if (l.route && l.route.path) {
+      routes.push(Object.keys(l.route.methods).map(m => m.toUpperCase()).join(',') + ' ' + l.route.path);
+    } else if (l.name === 'router' && l.handle?.stack) {
+      l.handle.stack.forEach(s => {
+        if (s.route?.path) {
+          routes.push(Object.keys(s.route.methods).map(m => m.toUpperCase()).join(',') + ' ' + s.route.path);
+        }
+      });
     }
-  }
-  return '';
-}
-
-app.use((req, res, next) => {
-  if (!AUTH_ON) return next();
-  if (req.method === 'OPTIONS') return next();
-  if (req.path === '/health') return next();
-  const provided = getKeyFromReq(req);
-  if (provided && provided === KEY) return next();
-  return res.status(401).json({ ok:false, error:'unauthorized' });
+  });
+  res.json({ ok:true, routes });
 });
 
-// Mount rute
-app.use('/', runRouter);
-app.use('/', jobsRouter); // ⬅️ OVDE SE DODAJE /jobs
+// Auth guard (osim /health i /_routes)
+app.use((req, res, next) => {
+  if (!AUTH_ON) return next();
+  if (req.path === '/health' || req.path === '/_routes') return next();
+  const k = (req.headers['x-tsbar-key'] || req.query.key || '').toString().trim();
+  if (k && k === KEY) return next();
+  res.status(401).json({ ok:false, error:'unauthorized' });
+});
 
+// Mount
+app.use('/', runRouter);
+app.use('/', jobsRouter);
+app.use('/', regulatorsRouter);
+
+// Start
 srv.listen(PORT, () => {
   console.log(`[worker] listening on :${PORT}`);
 });
