@@ -22,7 +22,11 @@ export async function fetchOK(url, opts = {}) {
     const res = await fetch(url, {
       method: 'GET',
       redirect: 'follow',
-      headers: { 'User-Agent': UA, ...(opts.headers || {}) },
+      headers: {
+        'User-Agent': UA,
+        'Accept-Language': opts.acceptLanguage || 'en;q=0.9, *;q=0.5',
+        ...(opts.headers || {}),
+      },
       signal
     });
     cancel();
@@ -37,8 +41,6 @@ export async function fetchText(url, opts = {}) {
   const res = await fetchOK(url, opts);
   if (!res) return null;
   const ctype = (res.headers.get('content-type') || '').toLowerCase();
-
-  // gzipped xml/sitemap support via fetch arrayBuffer
   if (/application\/gzip|\.gz$/i.test(ctype) || /(\.xml\.gz|\.gz)$/i.test(url)) {
     const buf = Buffer.from(await res.arrayBuffer());
     const gunz = zlib.gunzipSync(buf);
@@ -62,8 +64,20 @@ export async function loadCheerio(url, opts = {}) {
   return $;
 }
 
+// --- helpers za domen/poddomen
+export function getHostname(u) {
+  try { return new URL(u).hostname; } catch { return ''; }
+}
 export function sameOrigin(u, origin) {
   try { return new URL(u).origin === origin; } catch { return false; }
+}
+// ista "sajt" familija: dozvoli poddomene (cdn., files., static.) i isti apex
+export function sameSite(u, originUrl) {
+  try {
+    const host = new URL(u).hostname;
+    const base = new URL(originUrl).hostname;
+    return host === base || host.endsWith('.' + base);
+  } catch { return false; }
 }
 
 export function toAbs(base, href) {
