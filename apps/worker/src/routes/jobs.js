@@ -54,16 +54,33 @@ function guessSectionFromParams(p = {}) {
   return 'safety';
 }
 
+function parseSeeds(v) {
+  if (!v) return [];
+  if (Array.isArray(v)) return v.map(String).map(s => s.trim()).filter(Boolean);
+  // CSV string
+  return String(v)
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean);
+}
+
 async function runJobOnce(id, params) {
-  const broker  = (params.broker && String(params.broker).toLowerCase()) || guessBrokerFromParams(params);
-  const section = (params.section && String(params.section).toLowerCase()) || guessSectionFromParams(params);
-  const debug   = String(params.debug || '') === '1';
+  const broker   = (params.broker && String(params.broker).toLowerCase()) || guessBrokerFromParams(params);
+  const section  = (params.section && String(params.section).toLowerCase()) || guessSectionFromParams(params);
+  const debug    = String(params.debug || '') === '1';
+  const mode     = String(params.mode || '').toLowerCase();              // npr. "deep"
+  const ingest   =
+    params.ingest === true ||
+    String(params.ingest || '') === '1' ||
+    mode === 'deep';                                                     // Discover + Ingest (deep)
+  const homepage = params.homepage || params.url || '';
+  const seeds    = parseSeeds(params.seeds);
 
   if (!broker || !section) {
     return { ok:false, error:'missing_params', hint:'Provide broker & section or homepage' };
   }
 
-  const result = await orchestrate({ broker, section, debug });
+  const result = await orchestrate({ broker, section, debug, mode, ingest, homepage, seeds });
   if (!result || result.ok === false) return { ok:false, error:'not_supported', broker, section };
 
   return { ok:true, broker, section, ...result };
@@ -100,7 +117,6 @@ router.get('/jobs/:id', async (req, res) => {
         writeSSE(res, out, 'done');
         return res.end();
       }
-      // (opciono) neki log
       writeSSE(res, { level:'info', message:`Extracted ${out.broker}/${out.section}` }, 'log');
       writeSSE(res, out, 'done');
       return res.end();
