@@ -5,11 +5,11 @@ export const Jobs = new Map(); // id -> { id, createdAt, params }
 
 const router = Router();
 
-// Plugin i ti (debug) možete da proverite koje rute postoje
+// Pregled dostupnih ruta (koristi ga WP UI za samoproveru)
 router.get('/__routes', (_req, res) => {
   res.json({
     ok: true,
-    routes: ['/run', '/run.js', '/run.json', '/jobs/:id', '/regulators'],
+    routes: ['/run', '/run.js', '/run.json', '/jobs/:id', '/regulators', '/health'],
     sse: true,
   });
 });
@@ -35,9 +35,9 @@ const PATHS = ['/run', '/run.js', '/run.json'];
 /**
  * /run, /run.js, /run.json
  * - Plugin flow: ?homepage=&stream=1&mode=&sections=&seeds=&maxPages=...
- *   → kreira jobId; /jobs/:id će odraditi extract i vratiti normalized/acf
+ *   → kreira jobId; /jobs/:id odrađuje extract i vraća normalized/acf
  * - Direct flow: ?broker=<slug>&section=<name>
- *   → takođe kreira jobId i onda /jobs/:id izvršava posao
+ *   → takođe kreira jobId i /jobs/:id izvršava posao
  */
 router.all(PATHS, (req, res) => {
   const payload =
