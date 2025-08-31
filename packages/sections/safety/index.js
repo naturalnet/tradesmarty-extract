@@ -1,29 +1,20 @@
 // packages/sections/safety/index.js
-import { extractAdmiralsSafety } from '../../brokers/admirals/safety.js';
 import { extractGenericSafety } from './generic.js';
+// (po želji možeš ostaviti specifične – ali nisu obavezni)
+// import { extractAdmiralsSafety } from '../../brokers/admirals/safety.js';
+// import { extractEtoroSafety }     from '../../brokers/etoro/safety.js';
 
-/**
- * Sekcijski extractor:
- * - poznati brokeri (admirals) koriste specifičan extractor
- * - ostali brokeri koriste generički extractor zasnovan na homepage/seeds
- */
-export async function extract({ brokerSlug, ctx }) {
-  const slug = (brokerSlug || '').toLowerCase();
+export async function extract({ homepage, brokerSlug }) {
+  // 1) Ako želiš zadržati specifične: prvo probaj specifičan → fallback na generic
+  // switch ((brokerSlug || '').toLowerCase()) {
+  //   case 'admirals':
+  //   case 'admiralmarkets':
+  //   case 'admiral':
+  //     return await extractAdmiralsSafety();
+  //   case 'etoro':
+  //     return await extractEtoroSafety();
+  // }
 
-  // 1) Specifični adapteri (ako imamo)
-  switch (slug) {
-    case 'admirals':
-    case 'admiralmarkets':
-    case 'admiral':
-      return await extractAdmiralsSafety();
-  }
-
-  // 2) Generički fallback — zahteva homepage ili seeds
-  if (!ctx?.homepage && !(Array.isArray(ctx?.seeds) && ctx.seeds.length)) {
-    return { ok: false, error: 'not_supported', reason: 'no_homepage_or_seeds', hints: ['Provide homepage or add seeds[] URLs'] };
-  }
-
-  // Generički pokušaj (deterministički discovery + parsiranje)
-  const out = await extractGenericSafety({ homepage: ctx.homepage, seeds: ctx.seeds || [] });
-  return out;
+  // 2) Univerzalni fallback pokriva sve
+  return await extractGenericSafety({ homepage });
 }
