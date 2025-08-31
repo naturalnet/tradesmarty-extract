@@ -2,12 +2,10 @@
 // Universal deep Safety extractor: BFS crawl (+ JSON-LD), regulator/entity detection,
 // document link discovery, jurisdiction heuristics, and normalized output.
 
-import { fetchText, loadCheerio, fetchBuffer } from '../../core/http.js';
+import { fetchText, loadCheerio } from '../../core/http.js';
 
 /* ──────────────────────────────────────────────────────────────────────────
-   1) Canonical regulator directory (abbr + aliases)
-   - Znatno proširen spisak (EU/EEA, UK, CH, MEA, APAC, Americas, offshore).
-   - Dodaj slobodno još entiteta (radi dinamički).
+   1) Regulator directory (abbr + aliases) — proširen skup
 ────────────────────────────────────────────────────────────────────────── */
 
 const REGULATORS = [
@@ -114,7 +112,7 @@ const REGULATORS = [
   { abbr: 'SCB',    names: ['securities commission of the bahamas','scb bahamas'] },
   { abbr: 'CBCS',   names: ['central bank of curaçao and sint maarten','cbcs'] },
   { abbr: 'VFSC',   names: ['vanuatu financial services commission'] },
-  { abbr: 'FSA',    names: ['financial services authority'] }, // generic fallback (kept for older copy)
+  { abbr: 'FSA',    names: ['financial services authority'] }, // generic fallback
 ];
 
 /* ────────────────────────────────────────────────────────────────────────── */
@@ -227,6 +225,7 @@ async function crawl({ homepage, seeds=[], maxPages=40, maxDepth=2, timeoutMs=25
 
     try {
       if (allowPdf && /\.pdf($|\?)/i.test(url)) {
+        // PDF: preskačemo tekstualno parsiranje; ali beležimo url
         pages.push({ url, text:'', ld:[] });
         continue;
       }
@@ -236,7 +235,7 @@ async function crawl({ homepage, seeds=[], maxPages=40, maxDepth=2, timeoutMs=25
       const $ = await loadCheerio(html);
       const text = normText($('body').text());
 
-      // JSON-LD snapshots (organizacija/FAQ ponekad drži legalName/brand)
+      // JSON-LD snapshots (organizacija/FAQ mogu imati legalName/brand)
       const ld = [];
       $('script[type="application/ld+json"]').each((_, s)=>{
         try {
@@ -417,7 +416,7 @@ function investorFor(abbr){
   const A = (abbr||'').toUpperCase();
   if (A==='FCA')   return 'FSCS (eligibility dependent)';
   if (A==='CySEC') return 'ICF (eligibility dependent)';
-  if (A==='SIPC')  return 'SIPC (up to $500k / $250k cash for brokerage)';
+  if (A==='SIPC')  return 'SIPC (eligibility dependent)';
   return 'N/A';
 }
 function nbpFor(abbr){
@@ -439,19 +438,33 @@ export async function extractDeepSafety({
   allowPdf = true
 } = {}) {
 
-  if (!homepage) {
+  // Novi fallback: koristi origin prvog seeda ako nema homepage
+  const cleanSeeds = Array.isArray(seeds) ? seeds.filter(Boolean) : [];
+  if (!homepage && cleanSeeds.length) {
+    try {
+      const u = new URL(cleanSeeds[0]);
+      homepage = `${u.protocol}//${u.host}`;
+    } catch {}
+  }
+
+  // Ako i dalje nemamo ni homepage ni seeds → tek tada graceful poruka
+  if (!homepage && !cleanSeeds.length) {
     return {
-      description: 'No homepage provided — cannot crawl legal/regulatory pages.',
+      description: 'No homepage or seeds provided — cannot crawl legal/regulatory pages.',
       is_regulated: '',
       safety_highlights: [],
-      safety_caveats: ['Homepage URL is missing.'],
+      safety_caveats: ['Homepage/seed URL is missing.'],
       legal_entities: [],
       terms_url:'', risk_disclosure_url:'', client_agreement_url:'', open_account_url:'',
       triedPaths: [], sources: [], hints: ['Pass ?homepage=<url> or seeds[].']
     };
   }
 
-  const { pages, tried } = await crawl({ homepage, seeds, maxPages, maxDepth, timeoutMs, allowPdf });
+  const { pages, tried } = await crawl({
+    homepage,
+    seeds: cleanSeeds,
+    maxPages, maxDepth, timeoutMs, allowPdf
+  });
 
   // JSON-LD hints
   const ldHints = pages.flatMap(p => extractJSONLDOrgs(p.ld || []));
@@ -492,7 +505,6 @@ export async function extractDeepSafety({
     if (abbrs.some(a => ['SVGFSA','IFSC-BZ','BVI-FSC','FSC-MU','FSA-SC','VFSC','LFSA','SCB','CIMA','BMA'].includes(a))) {
       caveats.push('Offshore authorizations typically provide limited investor compensation.');
     }
-    // Retail NBP note if any Tier-1/2 CFD jurisdictions are present
     if (abbrs.some(a => ['FCA','CySEC','ASIC','NZ-FMA','SFC','MAS'].includes(a))) {
       highlights.push('Retail negative balance protection (per CFD rules/policies).');
     }
