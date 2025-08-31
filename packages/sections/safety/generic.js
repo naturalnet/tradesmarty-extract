@@ -1,439 +1,222 @@
 // packages/sections/safety/generic.js
-import { fetchOK, loadCheerio, toAbs, sameSite } from '../../core/http.js';
-import { autoSeedsFromSitemaps } from '../../core/sitemap.js';
-import { crawlDomainSeeds } from '../../core/crawl.js';
+import { fetchText, loadCheerio } from '../../core/http.js';
+import { findRegulatorsInText, tierFor, regionGuessFor } from '../../shared/regulators.js';
 
-const REGULATOR_TOKENS = [
-  { re: /\bFCA\b/i,   label: 'FCA'  },
-  { re: /\bCySEC\b/i, label: 'CySEC'},
-  { re: /\bASIC\b/i,  label: 'ASIC' },
-  { re: /\bFSCA\b/i,  label: 'FSCA' },
-  { re: /\bJSC\b/i,   label: 'JSC'  },
-  { re: /\bCMA\b/i,   label: 'CMA'  },
-  { re: /\bFSA\b/i,   label: 'FSA'  },
-  { re: /\bSFC\b/i,   label: 'SFC'  }, // Hong Kong
-  { re: /Securities\s+and\s+Futures\s+Commission/i, label: 'SFC' }
+const CANDIDATE_PATHS = [
+  '', 'regulation', 'regulations', 'regulatory', 'legal', 'legal-documents', 'documents',
+  'policies', 'compliance', 'risk', 'risk-disclosure', 'disclosures', 'disclosure',
+  'terms', 'terms-and-conditions', 'terms-and-conditions-of-business', 'client-agreement',
+  'about', 'about-us', 'imprint', 'licence', 'license', 'licensing', 'privacy',
+  'contact', 'faq', 'education/faq/regulation'
 ];
 
-// višejezični tokeni (EN + ex-YU + ZH)
-const LEGAL_TOKENS = [
-  // EN/common
-  'legal','legal-information','regulation','regulatory','documents','document','docs',
-  'policies','policy','risk','disclosure','terms','conditions','agreement','client',
-  'complaint','complaints','privacy','cookie','cookies','kyc','aml','download','downloads','forms','resources','support',
-  // ex-YU
-  'pravni','pravne','pravno','regulaci','uslovi','uvjeti','odredbe','sporazum','klijent',
-  'rizik','politika','privatnost','kolačić','kolacic',
-  // ZH (繁/简)
-  '法律','法規','法规','條款','条款','細則','细则','協議','协议','客戶協議','客户协议','風險','风险','披露',
-  '私隱','私隐','隱私','隐私','免責','免责声明','下載','下载','表格'
-].map(x => new RegExp(x, 'i'));
-
-const KEYWORD_PATTERNS = [
-  /risk|disclosure|terms|conditions|agreement|client|legal|privacy|cookie|complaints|kyc|aml|download|form|docs?/i,
-  /regulation|regulatory|cysec|fca|fsa|fsca|asic|jsc|cma|sfc/i
+const A_TXT = [
+  { key: 'terms_url',            rx: /(terms|conditions|client agreement)/i },
+  { key: 'risk_disclosure_url',  rx: /(risk( disclosure| warning)?)/i },
+  { key: 'client_agreement_url', rx: /(client( services)? agreement|customer agreement|account agreement)/i },
+  { key: 'open_account_url',     rx: /(open account|start trading|create account|sign up)/i }
 ];
 
-function uniq(arr){ return Array.from(new Set(arr.filter(Boolean))); }
-async function tryLoad(url, acceptLanguage) { return !!(await fetchOK(url, { acceptLanguage })); }
-
-function detectOpenAccount($, baseUrl) {
-  const candidates = [];
-  $('a[href]').each((_i,a)=>{
-    const $a = $(a);
-    const label = ($a.text() || '').toLowerCase();
-    const href  = String($a.attr('href') || '').trim();
-    if (!href || href.startsWith('#') || href.startsWith('javascript:')) return;
-    if (/(open (live )?account|join now|start trading|get started|open account|create account|register|signup|sign up|live account|apply now|start now)/i.test(label)) {
-      candidates.push(toAbs(baseUrl, href));
-    }
-    // kineski: 開戶/开户/註冊/注册
-    if (/(開戶|开户|開設帳戶|开设账户|立即開戶|立即开户|註冊|注册)/.test(label)) {
-      candidates.push(toAbs(baseUrl, href));
-    }
-  });
-  return candidates[0] || '';
+function uniq(arr) {
+  return Array.from(new Set(arr.filter(Boolean)));
 }
 
-function extractHeaderFooterLinks($, baseUrl) {
-  const buckets = new Set();
-  const areas = ['header','footer','nav','[role="navigation"]'];
-  areas.forEach(sel => {
-    $(sel).find('a[href]').each((_i,a)=>{
-      const href = String($(a).attr('href') || '');
-      const txt  = String($(a).text() || '');
-      const pair = (txt + ' ' + href);
-      if (LEGAL_TOKENS.some(re => re.test(pair))) buckets.add(toAbs(baseUrl, href));
-    });
-  });
-  return Array.from(buckets);
+function guessServeScope(abbr) {
+  const A = (abbr || '').toUpperCase();
+  if (A === 'FCA') return { serves_scope: 'COUNTRY_LIST', serve_country_codes: ['GB'], region_tokens: ['uk'] };
+  if (A === 'ASIC') return { serves_scope: 'COUNTRY_LIST', serve_country_codes: ['AU'], region_tokens: ['au'] };
+  if (A === 'CySEC') return { serves_scope: 'EEA', serve_country_codes: [], region_tokens: ['eu'] };
+  if (A === 'FSCA') return { serves_scope: 'COUNTRY_LIST', serve_country_codes: ['ZA'], region_tokens: ['row'] };
+  if (A === 'FSRA' || A === 'DFSA') return { serves_scope: 'COUNTRY_LIST', serve_country_codes: ['AE'], region_tokens: ['me'] };
+  if (A === 'GFSC') return { serves_scope: 'GLOBAL', serve_country_codes: [], region_tokens: ['wallet'] };
+  if (A === 'FSA') return { serves_scope: 'GLOBAL', serve_country_codes: [], region_tokens: ['row'] };
+  if (A === 'SEC' || A === 'FINRA' || A === 'SIPC' || A === 'NFA' || A === 'CFTC') return { serves_scope: 'COUNTRY_LIST', serve_country_codes: ['US'], region_tokens: ['us'] };
+  return { serves_scope: 'GLOBAL', serve_country_codes: [], region_tokens: ['row'] };
 }
 
-function extractHreflangs($, baseUrl) {
-  const out = new Set();
-  $('link[rel="alternate"][hreflang]').each((_i, link)=>{
-    const href = String($(link).attr('href') || '');
-    if (!href) return;
-    out.add(toAbs(baseUrl, href));
-  });
-  return Array.from(out);
-}
+function normText(t) { return (t || '').replace(/\s+/g, ' ').trim(); }
 
-function extractJsonLinks($, baseUrl) {
-  const found = new Set();
-  const rxUrl = /(https?:\/\/[^\s"']+|\b\/[A-Za-z0-9_\-./%?=&]+)(?=["'\s}])/g;
-  $('script').each((_i, s) => {
-    const txt = $(s).html() || '';
-    if (!/__NEXT_DATA__|__NUXT__|INITIAL_STATE|Nuxt|next|hydrate|pageProps|payload/i.test(txt)) return;
-    let m; let guard = 0;
-    while ((m = rxUrl.exec(txt)) && guard < 2000) {
-      guard++;
-      const abs = toAbs(baseUrl, m[1]);
-      if (sameSite(abs, baseUrl)) found.add(abs);
-    }
-  });
-  return Array.from(found);
-}
-
-function discoverLocalePrefixes({ homepageUrl, headerFooterLinks, hreflangHomes }) {
-  const prefixes = new Set();
-  const push = s => { if (s) prefixes.add('/' + s.replace(/^\//,'').replace(/\/$/,'')); };
-
-  try {
-    const seg = new URL(homepageUrl).pathname.replace(/(^\/|\/$)/g,'').split('/')[0];
-    if (/^[a-z]{2}(?:-[a-z]{2})?$/i.test(seg)) push(seg);
-  } catch {}
-
-  const scan = (arr=[]) => {
-    for (const u of arr) {
-      try {
-        const path = new URL(u).pathname;
-        const m = path.match(/^\/([a-z]{2}(?:-[a-z]{2})?)\//i);
-        if (m) push(m[1]);
-      } catch {}
-    }
-  };
-  scan(headerFooterLinks); scan(hreflangHomes);
-
-  // česte varijante
-  ['en','cy-en','au-en','bs-en','eu-en','int-en','global-en','sg-en','uk-en','za-en','zh-hk','zh-cn'].forEach(push);
-
-  return Array.from(prefixes);
-}
-
-function buildLocalizedCandidates(origin, prefixes) {
-  const tails = [
-    '/terms','/terms-and-conditions','/legal','/legal-information','/regulation','/regulations','/regulatory',
-    '/documents','/document','/docs','/download','/downloads','/forms','/resources','/support',
-    '/policies','/policy','/risk','/risk-disclosure','/agreement','/client',
-    '/privacy','/privacy-policy','/cookies','/cookie-policy','/complaints','/kyc','/aml'
-  ];
-  const out = new Set();
-  for (const t of tails) out.add(new URL(t, origin).toString());
-  for (const pref of prefixes) for (const t of tails)
-    out.add(new URL(pref + t.replace(/^\//,''), origin).toString());
-  return Array.from(out);
-}
-
-// klasifikacija po labeli i/ili URL-u (EN + ZH)
-function classifyByLabelOrUrl(items = []) {
-  const result = { terms:'', risk:'', agreement:'', privacy:'', disclaimer:'' };
-  const mk = (reArr) => (s) => reArr.some(re => re.test(s));
-
-  const RE = {
-    risk: mk([/risk/i, /disclos/i, /風險|风险|披露/]),
-    agreement: mk([/agreement|client/i, /協議|协议|客戶協議|客户协议/]),
-    terms: mk([/terms|conditions|tandc|t&c/i, /條款|条款|細則|细则|服務條款|使用條款/]),
-    privacy: mk([/privacy/i, /私隱|私隐|隱私|隐私/]),
-    disclaimer: mk([/disclaimer/i, /免責|免责声明/]),
-  };
-
-  for (const it of items) {
-    const low = (it.label + ' ' + it.url).toLowerCase();
-    // redosled: risk → agreement → terms → privacy → disclaimer
-    if (!result.risk && RE.risk(low)) result.risk = it.url;
-    else if (!result.agreement && RE.agreement(low)) result.agreement = it.url;
-    else if (!result.terms && RE.terms(low)) result.terms = it.url;
-    else if (!result.privacy && RE.privacy(low)) result.privacy = it.url;
-    else if (!result.disclaimer && RE.disclaimer(low)) result.disclaimer = it.url;
-  }
-  return result;
-}
-
-function extractEntitiesFromText(allText, pageUrl, homepage) {
+function extractEntitiesFromText(text) {
   const ents = [];
+  const T = text;
 
-  // Seychelles / FSA SDxxx
-  const fsaRef = (allText.match(/(?:Licence|License)\s*(?:No\.?|Number)?\s*(SD\d{2,3})/i)?.[1])
-              || (allText.match(/\bSD\d{2,3}\b/)?.[0]);
-  if (/Seychelles|FSA/i.test(allText) && fsaRef) {
+  // Entity + regulator u istoj rečenici
+  const rx = /([A-Z][A-Za-z0-9&'().\- ]{2,}?\s(?:Ltd|Limited|LLC|LLP|PLC|Pty(?:\sLtd)?|GmbH|AG|SA|S\.A\.|Pte(?:\.|\s)Ltd|Inc\.?))[^.]{0,200}?(?:authori[sz]ed|regulated|licensed|supervised|governed).{0,50}?\b(FCA|CySEC|ASIC|FSCA|FSA|FSRA|DFSA|GFSC|SEC|FINRA|SIPC|NFA|CFTC)\b/gi;
+
+  let m;
+  while ((m = rx.exec(T)) !== null) {
+    const entity_name = normText(m[1]);
+    const abbr = m[2].toUpperCase();
+    const level = tierFor(abbr);
+    const country_of_clients = regionGuessFor(abbr) || '';
+    const scope = guessServeScope(abbr);
+
     ents.push({
-      entity_name: 'Seychelles Entity',
-      country_of_clients: 'Rest of World',
-      regulator_abbreviation: 'FSA',
-      regulator: 'Financial Services Authority (Seychelles)',
-      regulation_level: 'Tier-3',
-      investor_protection_amount: 'N/A',
-      negative_balance_protection: 'Yes (policy)',
-      entity_service_url: pageUrl || homepage || '',
-      serves_scope: 'GLOBAL',
-      serve_country_codes: [],
-      exclude_country_codes: [],
+      entity_name,
+      country_of_clients,
+      regulator_abbreviation: abbr,
+      regulator: '',
+      regulation_level: level,
+      investor_protection_amount: (abbr === 'FCA') ? 'FSCS (eligibility dependent)' :
+                                  (abbr === 'CySEC') ? 'ICF (eligibility dependent)' :
+                                  (abbr === 'SIPC') ? 'SIPC (brokerage accounts)' : 'N/A',
+      negative_balance_protection: (abbr === 'FCA' || abbr === 'CySEC' || abbr === 'ASIC') ? 'Yes (retail; CFD rules/policy)' : 'Policy-based or N/A',
+      entity_service_url: '',
+      ...scope,
       terms_url: '',
       risk_disclosure_url: '',
       client_agreement_url: '',
       open_account_url: '',
-      tsbar_manual_seeds: '',
-      region_tokens: ['row'],
-      regulator_reference: fsaRef
-    });
-  }
-
-  // Cyprus / CySEC xx/xx
-  const cyMatch = allText.match(/CySEC[^.\n]*(?:licen[cs]e\s*(?:no\.?|number)?\s*)?(\d{2,3}\/\d{2})/i);
-  if (cyMatch || /Cyprus Investment Firm|MiFID|CySEC/i.test(allText)) {
-    ents.push({
-      entity_name: 'Cyprus Entity',
-      country_of_clients: 'EU/EEA',
-      regulator_abbreviation: 'CySEC',
-      regulator: 'Cyprus Securities and Exchange Commission',
-      regulation_level: 'Tier-2',
-      investor_protection_amount: 'ICF up to €20,000',
-      negative_balance_protection: 'Yes (retail; policy)',
-      entity_service_url: pageUrl || homepage || '',
-      serves_scope: 'EEA',
-      serve_country_codes: [],
-      exclude_country_codes: ['BE'],
-      terms_url: '',
-      risk_disclosure_url: '',
-      client_agreement_url: '',
-      open_account_url: '',
-      tsbar_manual_seeds: '',
-      region_tokens: ['eu'],
-      regulator_reference: cyMatch?.[1] ? `License ${cyMatch[1]}` : ''
-    });
-  }
-
-  // Hong Kong / SFC (CE No.)
-  const sfcHit = /SFC|Securities\s+and\s+Futures\s+Commission|證監會|证监会|香港/i.test(allText);
-  const ceNo = (allText.match(/\bCE\s*(?:No\.?|Number)?\s*[:：]?\s*([A-Z0-9]{5,8})/i)?.[1]) || '';
-  if (sfcHit) {
-    ents.push({
-      entity_name: 'Hong Kong Entity',
-      country_of_clients: 'Hong Kong',
-      regulator_abbreviation: 'SFC',
-      regulator: 'Securities and Futures Commission (Hong Kong)',
-      regulation_level: 'Tier-1',
-      investor_protection_amount: 'N/A',
-      negative_balance_protection: 'N/A',
-      entity_service_url: pageUrl || homepage || '',
-      serves_scope: 'COUNTRY_LIST',
-      serve_country_codes: ['HK'],
-      exclude_country_codes: [],
-      terms_url: '',
-      risk_disclosure_url: '',
-      client_agreement_url: '',
-      open_account_url: '',
-      tsbar_manual_seeds: '',
-      region_tokens: ['hk'],
-      regulator_reference: ceNo
-    });
-  }
-
-  // ASIC / AFSL
-  const afsl = allText.match(/\bAFSL\s*\d{3,6}\b/i)?.[0];
-  if (afsl || /\bASIC\b/i.test(allText)) {
-    ents.push({
-      entity_name: 'Australian Entity',
-      country_of_clients: 'Australia',
-      regulator_abbreviation: 'ASIC',
-      regulator: 'Australian Securities & Investments Commission',
-      regulation_level: 'Tier-1',
-      investor_protection_amount: 'N/A',
-      negative_balance_protection: 'Yes (retail; ASIC CFD order)',
-      entity_service_url: pageUrl || homepage || '',
-      serves_scope: 'COUNTRY_LIST',
-      serve_country_codes: ['AU'],
-      exclude_country_codes: [],
-      terms_url: '',
-      risk_disclosure_url: '',
-      client_agreement_url: '',
-      open_account_url: '',
-      tsbar_manual_seeds: '',
-      region_tokens: ['au'],
-      regulator_reference: afsl || ''
+      region_tokens: scope.region_tokens
     });
   }
 
   return ents;
 }
 
-export async function extractGenericSafety({ homepage, seeds = [] }) {
+function mergeEntities(a, b) {
+  const key = e => `${e.entity_name}|${e.regulator_abbreviation}|${e.country_of_clients}`.toLowerCase();
+  const map = new Map();
+  [...a, ...b].forEach(e => {
+    if (!e || !e.entity_name) return;
+    const k = key(e);
+    if (!map.has(k)) map.set(k, e);
+  });
+  return Array.from(map.values());
+}
+
+export async function extractGenericSafety({ homepage }) {
+  if (!homepage) return null;
+  const base = homepage.replace(/\/+$/, '');
   const triedPaths = [];
   const sources = [];
-  const hints = [];
-
-  const origin = (() => { try { return new URL(homepage).origin; } catch { return ''; } })();
-  if (!origin) return { ok:false, error:'not_supported', reason:'bad_homepage' };
-
-  // Accept-Language: dodaj zh-HK
-  let acceptLanguage = 'zh-HK;q=0.9, zh;q=0.8, en;q=0.7, *;q=0.5';
-
-  // 0) homepage (CTA + nav + hreflang + JSON)
-  let openAccount = '';
-  let homepageText = '';
-  let headerFooterLinks = [];
-  let hreflangHomes = [];
-  let jsonLinks = [];
-
-  triedPaths.push(homepage);
-  try {
-    const $home = await loadCheerio(homepage, { acceptLanguage });
-    sources.push(homepage);
-    homepageText = $('body').text() || '';
-    openAccount = detectOpenAccount($home, homepage);
-    headerFooterLinks = extractHeaderFooterLinks($home, homepage);
-    hreflangHomes = extractHreflangs($home, homepage).filter(u => sameSite(u, origin));
-    jsonLinks = extractJsonLinks($home, homepage);
-    // ako path nosi npr /en/ postavi accept
-    const pref = (new URL(homepage).pathname.match(/^\/([a-z]{2})(?:-[a-z]{2})?\b/i)?.[1] || '').toLowerCase();
-    if (pref) acceptLanguage = `${pref};q=0.9, zh-HK;q=0.85, en;q=0.8, *;q=0.5`;
-  } catch { /* ignore */ }
-
-  // 1) robots/sitemaps
-  let sitemapSeeds = [];
-  try {
-    sitemapSeeds = await autoSeedsFromSitemaps(origin, [
-      /regulat/i, /legal/i, /document/i, /policy/i,
-      /risk/i, /disclosure/i, /terms/i, /agreement/i, /client/i,
-      /privacy/i, /cookie/i, /complaints?/i, /kyc/i, /aml/i, /docs?/i, /legal-information/i,
-      /download/i, /form/i, /resource/i, /support/i
-    ], 64);
-  } catch {}
-
-  // 2) locale prefiksi -> kandidati
-  const prefixes = discoverLocalePrefixes({
-    homepageUrl: homepage, headerFooterLinks, hreflangHomes
-  });
-  const localizedCandidates = buildLocalizedCandidates(origin, prefixes);
-
-  // 3) crawl od homepage + nav + json linkova
-  const crawlSeeds = uniq([homepage, ...headerFooterLinks, ...jsonLinks]).slice(0, 16);
-  let crawled = [];
-  try {
-    crawled = await crawlDomainSeeds({
-      origin,
-      startUrls: crawlSeeds,
-      keywordPatterns: KEYWORD_PATTERNS,
-      maxPages: 60
-    });
-  } catch {}
-
-  // 4) finalni kandidati
-  const candidatePages = uniq([
-    ...seeds.map(s => toAbs(origin, s)),
-    ...sitemapSeeds,
-    ...headerFooterLinks,
-    ...hreflangHomes,
-    ...localizedCandidates,
-    ...jsonLinks,
-    ...crawled
-  ]).filter(u => sameSite(u, origin));
-
-  // validacija dostupnosti
   const pages = [];
-  for (const u of candidatePages) {
-    triedPaths.push(u);
-    if (await tryLoad(u, acceptLanguage)) {
-      pages.push(u);
-      sources.push(u);
-    }
-    if (pages.length >= 18) break;
-  }
 
-  if (!pages.length && !homepageText) {
-    return { ok:false, error:'not_supported', reason:'no_documents', triedPaths, hints:['No detectable legal/risk pages. Consider adding one seed URL.'] };
-  }
+  // 1) Skupi sve kandidat URL-ove (plusevi: bez duplih /)
+  const candidates = uniq(CANDIDATE_PATHS.map(p => p ? `${base}/${p}` : base));
 
-  // 5) parsiranje i sakupljanje linkova + labela
-  const labeled = []; // {url, label}
-  const regsFound = new Set();
-  const texts = [homepageText].filter(Boolean);
+  // 2) Fetch + parsiraj
+  const settled = await Promise.allSettled(candidates.map(async (url) => {
+    triedPaths.push(url);
+    const html = await fetchText(url, { timeout: 30000 });
+    const $ = await loadCheerio(url, { timeout: 30000 });
+    pages.push({ url, $, text: normText($('body').text()) });
+    sources.push(url);
+  }));
 
-  for (const u of pages) {
-    try {
-      const $ = await loadCheerio(u, { acceptLanguage });
-      const text = $('body').text() || '';
-      texts.push(text);
+  // 3) Rangiraj stranice (više bodova za prisutne regulatore/ključne fraze)
+  const scores = pages.map(p => {
+    let s = 0;
+    const T = p.text;
+    const regs = findRegulatorsInText(T);
+    s += regs.length * 5;
+    if (/authori[sz]ed|regulated|licensed/i.test(T)) s += 2;
+    if (/terms|risk|disclosure|client agreement/i.test(T)) s += 1;
+    return { url: p.url, s, regsCount: regs.length };
+  }).sort((x, y) => y.s - x.s);
 
-      $('a[href]').each((_i, a) => {
-        const href = String($(a).attr('href') || '');
-        const label = String($(a).text() || '');
-        const abs = toAbs(u, href);
-        if (!sameSite(abs, origin)) return;
+  // 4) Odredi skup regulatora + entitete
+  let regulatorsFound = [];
+  let entities = [];
+  const links = { terms_url: '', risk_disclosure_url: '', client_agreement_url: '', open_account_url: '' };
 
-        const pair = (label + ' ' + href);
-        if (LEGAL_TOKENS.some(re => re.test(pair)) || /\.pdf(\?|$)/i.test(abs)) {
-          labeled.push({ url: abs, label });
+  for (const p of pages) {
+    const regs = findRegulatorsInText(p.text);
+    if (regs.length) regulatorsFound = mergeRegs(regulatorsFound, regs);
+    entities = mergeEntities(entities, extractEntitiesFromText(p.text));
+
+    // linkovi
+    for (const a of p.$('a').toArray()) {
+      const href = p.$(a).attr('href') || '';
+      const txt  = normText(p.$(a).text());
+      if (!href || !txt) continue;
+      for (const def of A_TXT) {
+        if (!links[def.key] && def.rx.test(txt)) {
+          links[def.key] = absolutize(href, p.url);
         }
-      });
-
-      // BONUS: neke download stranice imaju liste bez <a> labela – pokupi i <a> u tablicama/ikonama
-      $('[download], .download, .downloads, .doc, .docs').find('a[href]').each((_i, a) => {
-        const href = String($(a).attr('href') || '');
-        const label = String($(a).text() || 'Download');
-        const abs = toAbs(u, href);
-        if (sameSite(abs, origin)) labeled.push({ url: abs, label });
-      });
-
-      for (const t of REGULATOR_TOKENS) if (t.re.test(text)) regsFound.add(t.label);
-      if (!openAccount) openAccount = detectOpenAccount($, u);
-    } catch {/* ignore */}
+      }
+    }
   }
 
-  // 6) entiteti + klasifikacija
-  const allText = texts.join('\n');
-  const entities = extractEntitiesFromText(allText, pages[0] || '', homepage);
-
-  // deduplikacija po URL-u, zadrži prvu labelu
-  const seen = new Set();
-  const items = [];
-  for (const it of labeled) {
-    if (seen.has(it.url)) continue;
-    seen.add(it.url);
-    items.push(it);
+  // Ako nemamo entitete, makar složi “po abbr”
+  if (entities.length === 0 && regulatorsFound.length) {
+    entities = regulatorsFound.map(r => {
+      const scope = guessServeScope(r.abbr);
+      return {
+        entity_name: '', // nema eksplicitno na sajtu – backfill u WP ne menja ime
+        country_of_clients: r.countryGuess || '',
+        regulator_abbreviation: r.abbr,
+        regulator: r.name,
+        regulation_level: r.level,
+        investor_protection_amount: (r.abbr === 'FCA') ? 'FSCS (eligibility dependent)' :
+                                    (r.abbr === 'CySEC') ? 'ICF (eligibility dependent)' :
+                                    (r.abbr === 'SIPC') ? 'SIPC (brokerage accounts)' : 'N/A',
+        negative_balance_protection: (r.abbr === 'FCA' || r.abbr === 'CySEC' || r.abbr === 'ASIC') ? 'Yes (retail; CFD rules/policy)' : 'Policy-based or N/A',
+        entity_service_url: scores[0]?.url || base,
+        ...scope,
+        terms_url: links.terms_url,
+        risk_disclosure_url: links.risk_disclosure_url,
+        client_agreement_url: links.client_agreement_url,
+        open_account_url: links.open_account_url,
+        region_tokens: scope.region_tokens
+      };
+    });
   }
 
-  const pick = classifyByLabelOrUrl(items);
-
-  // fallback pick po substringu ako treba
-  const fallbackPick = (needle) => {
-    const n = needle.toLowerCase();
-    for (const it of items) if ((it.url + ' ' + it.label).toLowerCase().includes(n)) return it.url;
-    return '';
+  // 5) Summary polja
+  const abbrs = uniq([
+    ...regulatorsFound.map(r => r.abbr),
+    ...entities.flatMap(e => (e.regulator_abbreviation || '').split('/').map(x => x.trim()))
+  ]);
+  const tierCounts = {
+    t1: entities.filter(e => (e.regulation_level || '').toLowerCase() === 'tier-1').length,
+    t2: entities.filter(e => (e.regulation_level || '').toLowerCase() === 'tier-2').length,
+    t3: entities.filter(e => (e.regulation_level || '').toLowerCase() === 'tier-3').length,
   };
 
-  const terms = pick.terms || fallbackPick('terms') || fallbackPick('條款') || fallbackPick('条款') || pick.privacy || fallbackPick('privacy');
-  const risk  = pick.risk  || fallbackPick('risk')  || fallbackPick('風險') || fallbackPick('风险') || fallbackPick('披露');
-  const agree = pick.agreement || fallbackPick('agreement') || fallbackPick('協議') || fallbackPick('协议') || fallbackPick('client');
+  const description = abbrs.length
+    ? `Broker posluje pod više regulatora (${abbrs.join(', ')}). Višeslojna regulativa (Tier-1: ${tierCounts.t1}, Tier-2: ${tierCounts.t2}, Tier-3: ${tierCounts.t3}) — konkretne zaštite zavise od entiteta i jurisdikcije.`
+    : 'Nisu eksplicitno navedene licence na javnim “legal/regulatory” stranama — proveriti direktno dokumente i fusnote.';
 
-  const normalized = {
-    description: regsFound.size
-      ? `Detected regulators: ${Array.from(regsFound).join(', ')}.`
-      : 'Regulatory information found on legal/risk pages.',
-    is_regulated: Array.from(regsFound).join(', '),
-    safety_highlights: regsFound.size ? ['Regulatory authorizations detected.'] : [],
-    safety_caveats: (!terms && !risk ? ['Key legal/risk links not clearly detected.'] : []),
+  const safety_highlights = [];
+  if (tierCounts.t1 > 0) safety_highlights.push('Prisutan Tier-1 nadzor (npr. FCA/ASIC/SEC).');
+  if (abbrs.includes('CySEC')) safety_highlights.push('EU pokrivenost kroz CySEC entitet.');
+  if (abbrs.includes('FSRA') || abbrs.includes('DFSA')) safety_highlights.push('Bliski Istok (ADGM/DFSA) podrška.');
+  if (abbrs.includes('GFSC')) safety_highlights.push('Poseban DLT/wallet nadzor (GFSC).');
+
+  const safety_caveats = [
+    'Zaštite (FSCS/ICF/SIPC itd.) i NBP važe po entitetu i statusu klijenta.',
+    'Potrebno proveriti pod kojim entitetom je otvoren nalog (razlike u zaštitama).',
+  ];
+
+  // 6) Normalized odgovor
+  return {
+    description,
+    is_regulated: abbrs.join(', '),
+    safety_highlights,
+    safety_caveats,
     legal_entities: entities,
-    terms_url: terms || '',
-    risk_disclosure_url: risk || '',
-    client_agreement_url: agree || '',
-    open_account_url: openAccount || '',
+    terms_url: links.terms_url,
+    risk_disclosure_url: links.risk_disclosure_url,
+    client_agreement_url: links.client_agreement_url,
+    open_account_url: links.open_account_url || base,
     warnings: [],
-    triedPaths: uniq(triedPaths),
-    hints,
-    sources: uniq(pages)
+    triedPaths: triedPaths,
+    sources: uniq(sources),
+    hints: []
   };
+}
 
-  return normalized;
+function mergeRegs(a, regs) {
+  const by = new Map(a.map(r => [r.abbr, r]));
+  for (const r of regs) by.set(r.abbr, r);
+  return Array.from(by.values());
+}
+
+function absolutize(href, base) {
+  try {
+    return new URL(href, base).toString();
+  } catch {
+    return href;
+  }
 }
