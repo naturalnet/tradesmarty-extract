@@ -1,22 +1,21 @@
 // packages/sections/safety/index.js
 import { extractDeepSafety } from './generic-deep.js';
-import { extractEtoro } from './vendors/etoro.js';
 
 function pickHomepage(ctx = {}) {
-  const cand = [
-    ctx.homepage, ctx.url, ctx.website, ctx.home, ctx.base
-  ].map(x => (typeof x === 'string' ? x.trim() : '')).filter(Boolean);
+  const cand = [ctx.homepage, ctx.url, ctx.website, ctx.home, ctx.base]
+    .map(x => (typeof x === 'string' ? x.trim() : ''))
+    .filter(Boolean);
   let hp = cand[0] || '';
   if (hp && !/^https?:\/\//i.test(hp)) hp = 'https://' + hp;
   return hp.replace(/\/+$/, '');
 }
 
 function toAcf(n = {}) {
-  const pros  = Array.isArray(n.safety_highlights) ? n.safety_highlights : [];
-  const cons  = Array.isArray(n.safety_caveats)    ? n.safety_caveats    : [];
+  const pros = Array.isArray(n.safety_highlights) ? n.safety_highlights : [];
+  const cons = Array.isArray(n.safety_caveats) ? n.safety_caveats : [];
   const pc = [
-    ...pros.map(d => ({ type: 'pro',  description: d })),
-    ...cons.map(d => ({ type: 'con',  description: d })),
+    ...pros.map(d => ({ type: 'pro', description: d })),
+    ...cons.map(d => ({ type: 'con', description: d })),
   ];
 
   const ents = (n.legal_entities || []).map(e => ({
@@ -28,7 +27,7 @@ function toAcf(n = {}) {
     regulation_level: e.regulation_level || '',
     investor_protection_amount: e.investor_protection_amount || '',
     negative_balance_protection: e.negative_balance_protection || '',
-    regulator_reference: '', // plugin povezuje preko abbreviations
+    regulator_reference: '', // WP plugin će linkovati preko abbreviations/indexa
     entity_service_url: e.entity_service_url || '',
     serves_scope: e.serves_scope || '',
     serve_country_codes: e.serve_country_codes || [],
@@ -37,7 +36,7 @@ function toAcf(n = {}) {
     risk_disclosure_url: e.risk_disclosure_url || '',
     client_agreement_url: e.client_agreement_url || '',
     open_account_url: e.open_account_url || '',
-    tsbar_manual_seeds: (e.sources || n.sources || []).join('\n'),
+    tsbar_manual_seeds: (e.sources || []).join('\n'),
     region_tokens: e.region_tokens || []
   }));
 
@@ -60,18 +59,13 @@ function toAcf(n = {}) {
   };
 }
 
-function isEtoro(url = '') {
-  try { return new URL(url).host.replace(/^www\./,'').endsWith('etoro.com'); }
-  catch { return false; }
-}
-
 export async function extract(ctx = {}) {
   const homepage = pickHomepage(ctx);
   const seeds = Array.isArray(ctx.seeds) ? ctx.seeds : (ctx.seeds ? [ctx.seeds] : []);
   const opt = {
     homepage,
     seeds,
-    maxPages: Number(ctx.maxPages || 24),
+    maxPages: Number(ctx.maxPages || 32),
     maxDepth: Number(ctx.maxDepth || 2),
     timeoutMs: Number(ctx.timeoutMs || 25000),
     allowPdf: true
@@ -85,16 +79,16 @@ export async function extract(ctx = {}) {
       safety_highlights: [],
       safety_caveats: ['Homepage URL is missing.'],
       legal_entities: [],
-      terms_url:'', risk_disclosure_url:'', client_agreement_url:'', open_account_url:'',
-      triedPaths: [], sources: [], hints: ['Pass ?homepage=<url> or seeds[].']
+      terms_url: '', risk_disclosure_url: '', client_agreement_url: '',
+      open_account_url: '',
+      warnings: [],
+      triedPaths: [],
+      sources: [],
+      hints: ['Pass ?homepage=<url> or seeds[].']
     };
-  } else if (isEtoro(homepage)) {
-    // ← MOJ “MOZAK” ZA eToro
-    out = await extractEtoro(opt);
   } else {
-    // fallback univerzalni deep
-    const deep = await extractDeepSafety(opt);
-    out = (deep && deep.normalized) ? deep.normalized : deep;
+    out = await extractDeepSafety(opt);
+    out = (out && out.normalized) ? out.normalized : out;
   }
 
   const normalized = (out && typeof out === 'object') ? out : {
@@ -104,11 +98,15 @@ export async function extract(ctx = {}) {
     safety_caveats: ['No regulatory pages detected.'],
     legal_entities: [],
     terms_url: '', risk_disclosure_url: '', client_agreement_url: '',
-    open_account_url: homepage, warnings: [], triedPaths: opt.seeds || [], sources: [], hints: []
+    open_account_url: homepage,
+    warnings: [],
+    triedPaths: opt.seeds || [],
+    sources: [],
+    hints: []
   };
 
   return { ok: true, normalized, acf: toAcf(normalized) };
 }
 
-// CommonJS compat
+// CommonJS
 try { module.exports = { extract }; } catch {}
