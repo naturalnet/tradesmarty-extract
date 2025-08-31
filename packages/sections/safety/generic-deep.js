@@ -1,26 +1,34 @@
 // packages/sections/safety/generic-deep.js
-// Deep SAFETY ekstraktor sa podrškom za:
-// - SPA/Next/Nuxt JSON blobove (__NEXT_DATA__, window.__NUXT__, __INITIAL_STATE__, <script type="application/json">)
-// - subdomene istog sajta (npr. content.etoro.com)
-// - agregaciju linkova iz homepage footera pre BFS
-// - hvatanje PDF/Terms/Risk/Agreement dokumenata
-// - parsiranje entiteta i regulatora i iz HTML i iz JSON-a
+// Deep SAFETY ekstraktor (SPA aware):
+// - Next/Nuxt/SPA JSON blobs (__NEXT_DATA__, window.__NUXT__, __INITIAL_STATE__, <script type="application/json">)
+// - subdomenski CDN (isti root domen) npr. content.example.com
+// - footer-seed sa homepage-a pre BFS
+// - sitemap discovery (/sitemap*.xml)
+// - JSON endpoint discovery iz HTML-a
+// - PDF link discovery (optional tekst ako je pdf-parse instaliran)
+// - robust headers (bot-avoidance)
+// - fuzija signala (HTML, JSON, API, PDF)
+
+let pdfParse = null;
+try { pdfParse = (await import('pdf-parse')).default; } catch {}
 
 const UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
-  '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 TS-Deep/1.1';
+  '(KHTML, like Gecko) Chrome/124.0 Safari/537.36';
 
 const DEFAULT_PATHS = [
-  '/regulation', '/regulations', '/regulatory', '/licence', '/license',
-  '/legal', '/legal-documents', '/documents', '/policies', '/policy',
-  '/risk', '/risk-disclosure', '/disclosure', '/compliance',
-  '/terms', '/terms-and-conditions', '/client-agreement', '/client-services-agreement',
-  '/customer-service/regulation', '/about/regulation', '/about-us/regulation', '/education/faq/regulation',
+  '/regulation','/regulations','/regulatory',
+  '/legal','/legal-documents','/documents',
+  '/policies','/policy','/compliance',
+  '/risk','/risk-disclosure','/disclosure',
+  '/terms','/terms-and-conditions',
+  '/client-agreement','/client-services-agreement',
+  '/customer-service/regulation','/about/regulation','/about-us/regulation',
 ];
 
 const LOCALES = ['', '/en', '/en-us', '/en-gb', '/en-au', '/en-eu'];
 
-// ---- Regulator katalog (proširi po želji) ----
+// ——— Regulator leksikon (proširiv) ———
 const REGULATORS = [
   { abbr: 'FCA',   name: 'Financial Conduct Authority',                    tier: 'Tier-1', tokens: ['uk'] },
   { abbr: 'ASIC',  name: 'Australian Securities & Investments Commission', tier: 'Tier-1', tokens: ['au'] },
@@ -64,7 +72,7 @@ function normAbbr(s) {
     'FSC (SEYCHELLES)': 'FSA',
   };
   const u = s.toUpperCase().replace(/\s+/g, ' ').trim();
-  if (u === 'CYSEC') return 'CySEC'; // mixed-case izuzetak
+  if (u === 'CYSEC') return 'CySEC';
   return m[u] || u;
 }
 function normStr(s) { return (s||'').toLowerCase().replace(/\s+/g, ' ').trim(); }
@@ -74,36 +82,49 @@ function host(u){ try { return new URL(u).host; } catch { return ''; } }
 function rootHost(h){
   const p = (h||'').split('.').filter(Boolean);
   if (p.length <= 2) return h || '';
-  // heuristika (nije savršena za .co.uk, ali OK za .com/.net ...)
+  // heuristika: .com/.net/.org… (za .co.uk nije savršeno, ali OK)
   return p.slice(-2).join('.');
 }
-function sameSite(a,b){
-  try { return rootHost(host(a)) === rootHost(host(b)); } catch { return false; }
-}
+function sameSite(a,b){ return rootHost(host(a)) === rootHost(host(b)); }
 function joinUrl(base, path){ try { return new URL(path, base).toString(); } catch { return ''; } }
 
-async function fetchText(url, timeoutMs=25000){
+function makeHeaders(baseUrl){
+  return {
+    'User-Agent': UA,
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept-Language': 'en-GB,en-US;q=0.9,en;q=0.8',
+    'Referer': new URL(baseUrl).origin + '/',
+    'Cache-Control': 'no-cache',
+    'Pragma': 'no-cache',
+    'Sec-Fetch-Dest': 'document',
+    'Sec-Fetch-Mode': 'navigate',
+    'Sec-Fetch-Site': 'same-origin'
+  };
+}
+
+async function fetchRaw(url, timeoutMs, headers){
   const ctrl = new AbortController();
   const t = setTimeout(()=>ctrl.abort(), timeoutMs);
   try {
-    const res = await fetch(url, {
-      headers: {
-        'User-Agent': UA,
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.8',
-        'Cache-Control': 'no-cache',
-        'Pragma': 'no-cache',
-      },
-      redirect: 'follow',
-      signal: ctrl.signal
-    });
-    const text = await res.text();
-    return { ok: res.ok, status: res.status, url: res.url, text };
+    const res = await fetch(url, { headers, redirect:'follow', signal: ctrl.signal });
+    const buf = await res.arrayBuffer();
+    const ct  = res.headers.get('content-type') || '';
+    return { ok: res.ok, status: res.status, url: res.url, buf, ct };
   } catch (e) {
-    return { ok:false, status:0, url, text:'', error:String(e?.message||e) };
+    return { ok:false, status:0, url, buf:null, ct:'', error:String(e?.message||e) };
   } finally {
     clearTimeout(t);
   }
+}
+
+async function fetchText(url, timeoutMs=25000, baseHeaders = {}) {
+  const h = { ...makeHeaders(url), ...baseHeaders };
+  const r = await fetchRaw(url, timeoutMs, h);
+  if (!r.ok || !r.buf) return { ok:false, status:r.status, url:r.url, text:'', ct:r.ct, error:r.error };
+  let text = '';
+  try { text = new TextDecoder('utf-8').decode(new Uint8Array(r.buf)); }
+  catch {}
+  return { ok:r.ok, status:r.status, url:r.url, text, ct:r.ct };
 }
 
 function plainText(html) {
@@ -111,7 +132,7 @@ function plainText(html) {
     .replace(/<script[\s\S]*?<\/script>/gi, ' ')
     .replace(/<style[\s\S]*?<\/style>/gi, ' ')
     .replace(/<!--[\s\S]*?-->/g, ' ')
-    .replace(/<noscript[\s\S]*?<\/noscript>/gi, ' ') // noscript prividno brišemo (JSON hvatamo zasebno)
+    .replace(/<noscript[\s\S]*?<\/noscript>/gi, ' ')
     .replace(/<[^>]+>/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
@@ -119,7 +140,7 @@ function plainText(html) {
 
 function extractAnchors(html, baseUrl) {
   const out = [];
-  const re = /<a\b[^>]*?href\s*=\s*["']?([^"' >]+)["']?[^>]*>(.*?)<\/a>/gi;
+  const re = /<a\b[^>]*?href\s*=\s*["']?([^"' >]+)["']?[^>]*>/gi;
   let m;
   while ((m = re.exec(html))) {
     const href = (m[1]||'').trim();
@@ -129,21 +150,17 @@ function extractAnchors(html, baseUrl) {
   return Array.from(new Set(out));
 }
 
-// --- JSON blob ekstrakcija (Next/Nuxt/SPA) ---
 function extractJsonBlobs(html) {
   const blobs = [];
 
-  // 1) <script type="application/json">...</script>
   const reTypeJson = /<script[^>]*type=["']application\/json["'][^>]*>([\s\S]*?)<\/script>/gi;
   let m;
   while ((m = reTypeJson.exec(html))) {
     const raw = (m[1] || '').trim();
-    if (!raw) continue;
     const obj = safeParseJson(raw);
     if (obj) blobs.push(obj);
   }
 
-  // 2) Next.js __NEXT_DATA__
   const reNext = /<script[^>]*id=["']__NEXT_DATA__["'][^>]*>([\s\S]*?)<\/script>/i;
   const mn = reNext.exec(html);
   if (mn && mn[1]) {
@@ -151,7 +168,6 @@ function extractJsonBlobs(html) {
     if (obj) blobs.push(obj);
   }
 
-  // 3) window.__NUXT__ = {...}
   const reNuxt = /window\.__NUXT__\s*=\s*({[\s\S]*?});?\s*<\/script>/i;
   const mu = reNuxt.exec(html);
   if (mu && mu[1]) {
@@ -159,7 +175,6 @@ function extractJsonBlobs(html) {
     if (obj) blobs.push(obj);
   }
 
-  // 4) var __INITIAL_STATE__ = {...}
   const reInit = /(?:window\.)?__INITIAL_STATE__\s*=\s*({[\s\S]*?});?\s*<\/script>/i;
   const mi = reInit.exec(html);
   if (mi && mi[1]) {
@@ -171,15 +186,10 @@ function extractJsonBlobs(html) {
 }
 
 function safeParseJson(raw) {
-  try {
-    // pokušaj čist JSON
-    return JSON.parse(raw);
-  } catch {
-    // fallback: pokušaj da nađeš najbliži {...} blok
+  try { return JSON.parse(raw); }
+  catch {
     const m = raw.match(/{[\s\S]*}/);
-    if (m) {
-      try { return JSON.parse(m[0]); } catch {}
-    }
+    if (m) { try { return JSON.parse(m[0]); } catch {} }
   }
   return null;
 }
@@ -188,37 +198,65 @@ function jsonWalkStrings(obj, cb, seen = new WeakSet()) {
   if (!obj || typeof obj !== 'object') return;
   if (seen.has(obj)) return;
   seen.add(obj);
-
-  if (Array.isArray(obj)) {
-    for (const v of obj) {
-      if (typeof v === 'string') cb(v);
-      else if (v && typeof v === 'object') jsonWalkStrings(v, cb, seen);
-    }
-  } else {
-    for (const k of Object.keys(obj)) {
-      const v = obj[k];
-      if (typeof v === 'string') cb(v);
-      else if (v && typeof v === 'object') jsonWalkStrings(v, cb, seen);
-    }
-  }
+  const each = (v) => {
+    if (typeof v === 'string') cb(v);
+    else if (v && typeof v === 'object') jsonWalkStrings(v, cb, seen);
+  };
+  if (Array.isArray(obj)) { for (const v of obj) each(v); }
+  else { for (const k of Object.keys(obj)) each(obj[k]); }
 }
 
-// ---- heuristike ----
+// ——— Sitemap discovery ———
+async function discoverSitemap(base, timeoutMs, baseHeaders) {
+  const out = new Set();
+  const candidates = [
+    '/sitemap.xml', '/sitemap_index.xml', '/sitemap-index.xml'
+  ].map(p => joinUrl(base, p));
+
+  for (const u of candidates) {
+    const r = await fetchText(u, timeoutMs, baseHeaders);
+    if (!r.ok || !r.text) continue;
+    // ultra-jednostavno izvlačenje <loc>
+    const re = /<loc>([^<]+)<\/loc>/gi;
+    let m;
+    while ((m = re.exec(r.text))) {
+      const loc = sanitizeUrl((m[1]||'').trim());
+      if (!loc) continue;
+      if (sameSite(base, loc) && /regulat|legal|document|disclosure|terms|licen/i.test(loc)) {
+        out.add(loc);
+      }
+    }
+  }
+  return Array.from(out);
+}
+
+// ——— JSON endpoint discovery u HTML-u ———
+function discoverJsonEndpoints(html, baseUrl) {
+  const out = new Set();
+  // “grubi” regex ka .json
+  const re = /https?:\/\/[^\s"'<>]+?\.json\b/gi;
+  let m;
+  while ((m = re.exec(html))) {
+    out.add(m[0]);
+  }
+  // data-url / inline config vrednosti (relativno)
+  const reData = /data-(?:url|endpoint)=["']([^"']+)["']/gi;
+  while ((m = reData.exec(html))) {
+    out.add(joinUrl(baseUrl, m[1]));
+  }
+  return Array.from(out);
+}
+
 function candidatePaths(homepage, extraSeeds=[]) {
   const base = new URL(homepage).origin;
   const cand = new Set([homepage]);
-
   for (const loc of LOCALES) {
     for (const p of DEFAULT_PATHS) {
       const path = (loc + '/' + p.replace(/^\/+/,'')).replace(/\/+/g,'/');
-      const u = joinUrl(base, path);
-      cand.add(u);
+      cand.add(joinUrl(base, path));
     }
   }
-  for (const s of extraSeeds) {
-    const u = joinUrl(base, s);
-    cand.add(u);
-  }
+  for (const s of extraSeeds) cand.add(joinUrl(base, s));
   return Array.from(cand);
 }
 
@@ -236,22 +274,20 @@ function scoreRegPage(url) {
   let s = 0;
   if (/\bregulat/i.test(u)) s += 3;
   if (/\blicen[cs]e|licen[cs]ing/i.test(u)) s += 2;
-  if (/\blegal|documents|disclosure|compliance|terms|risk\b/i.test(u)) s += 1;
+  if (/\blegal|documents|disclosure|terms|risk\b/i.test(u)) s += 1;
   return s;
 }
 
-// --- Parsiranje iz tekstova ---
+// ——— Parsiranje iz teksta ———
 function parseRegulators(text) {
-  const found = new Map(); // abbr -> object
+  const found = new Map();
   for (const r of REGULATORS) {
-    const a = r.abbr;
-    const reAbbr = new RegExp(`\\b${a.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')}\\b`, 'i');
+    const reAbbr = new RegExp(`\\b${r.abbr.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')}\\b`, 'i');
     if (reAbbr.test(text)) found.set(r.abbr, r);
   }
   for (const r of REGULATORS) {
     if (found.has(r.abbr)) continue;
-    const nn = normStr(r.name);
-    if (nn && text.toLowerCase().includes(nn)) found.set(r.abbr, r);
+    if (text.toLowerCase().includes(normStr(r.name))) found.set(r.abbr, r);
   }
   return Array.from(found.values());
 }
@@ -268,12 +304,10 @@ function parseEntities(text) {
 }
 
 function parseCompensation(text) {
-  const bullets = [];
   const fscs = /\bFSCS\b/i.test(text);
   const icf  = /\bICF\b/i.test(text) || /\bInvestor Compensation Fund\b/i.test(text);
   const amtF = text.match(/£\s?(\d{1,3}(?:,\d{3})?)/) || text.match(/GBP\s?(\d{1,3}(?:,\d{3})?)/);
   const amtE = text.match(/€\s?(\d{1,3}(?:,\d{3})?)/) || text.match(/EUR\s?(\d{1,3}(?:,\d{3})?)/);
-
   let inv = '';
   if (fscs && amtF) inv = `FSCS up to £${amtF[1]}`;
   if (!inv && fscs) inv = 'FSCS up to £85,000';
@@ -281,7 +315,6 @@ function parseCompensation(text) {
   if (!inv && icf) inv = 'ICF up to €20,000';
   return inv;
 }
-
 function parseNBP(text) {
   if (/\bnegative balance protection\b/i.test(text)) return 'Yes (retail)';
   if (/\bNBP\b/i.test(text)) return 'Yes (retail)';
@@ -300,7 +333,18 @@ function regionTokensForReg(abbr) {
   return r ? (r.tokens || []) : [];
 }
 
-// --- main ---
+// ——— PDF tekst (opciono) ———
+async function tryPdfText(url, timeoutMs, baseHeaders) {
+  if (!pdfParse) return '';
+  const r = await fetchRaw(url, timeoutMs, { ...makeHeaders(url), ...baseHeaders });
+  if (!r.ok || !r.buf) return '';
+  try {
+    const data = await pdfParse(Buffer.from(r.buf));
+    return (data.text || '').replace(/\s+/g, ' ').trim();
+  } catch { return ''; }
+}
+
+// ——— Glavna funkcija ———
 export async function extractDeepSafety(opt = {}) {
   const homepage = sanitizeUrl(opt.homepage || '');
   const tried = [];
@@ -308,9 +352,10 @@ export async function extractDeepSafety(opt = {}) {
   const seen = new Set();
   const queue = [];
   const depthOf = new Map();
-  const maxPages = Math.max(6, Number(opt.maxPages || 36));
-  const maxDepth = Math.max(1, Number(opt.maxDepth || 2));
+  const maxPages = Math.max(8, Number(opt.maxPages || 48));
+  const maxDepth = Math.max(1, Number(opt.maxDepth || 3));
   const timeoutMs = Number(opt.timeoutMs || 25000);
+  const baseHeaders = opt.headers || {};
 
   if (!homepage) {
     return {
@@ -330,32 +375,49 @@ export async function extractDeepSafety(opt = {}) {
     };
   }
 
-  const seeds = Array.isArray(opt.seeds) ? opt.seeds : (opt.seeds ? [opt.seeds] : []);
-  const baseCandidates = candidatePaths(homepage, seeds);
-
-  // 0) UZMI HOMEPAGE PRVO i izvuci anchor linkove (footer obično ima legal/policy)
-  const homeRes = await fetchText(homepage, timeoutMs);
+  // 0) Homepage: footer seed
+  const homeRes = await fetchText(homepage, timeoutMs, baseHeaders);
   if (homeRes.ok) {
     sources.add(homeRes.url);
     tried.push(homeRes.url);
-    const anchors = extractAnchors(homeRes.text, homeRes.url);
-    anchors
-      .filter(u => /regulat|legal|document|disclosure|terms|licen[cs]|compliance/i.test(u))
-      .forEach(u => baseCandidates.push(u));
   }
 
-  // sortiraj po “regulatory score”
+  const baseCandidates = candidatePaths(homepage, Array.isArray(opt.seeds) ? opt.seeds : (opt.seeds ? [opt.seeds] : []));
+  if (homeRes.ok && homeRes.text) {
+    extractAnchors(homeRes.text, homeRes.url)
+      .filter(u => /regulat|legal|document|disclosure|terms|licen[cs]|compliance/i.test(u))
+      .forEach(u => baseCandidates.push(u));
+
+    // JSON endpoints iz HTML-a
+    discoverJsonEndpoints(homeRes.text, homeRes.url).forEach(u => baseCandidates.push(u));
+  }
+
+  // 0.5) sitemap
+  try {
+    const sm = await discoverSitemap(homepage, timeoutMs, baseHeaders);
+    sm.forEach(u => baseCandidates.push(u));
+  } catch {}
+
+  // sortiraj po score
   const uniq = Array.from(new Set(baseCandidates));
   uniq.sort((a,b) => scoreRegPage(b) - scoreRegPage(a));
 
   // seed BFS
   for (const u of uniq) {
     if (sameSite(homepage, u)) { queue.push(u); depthOf.set(u, 0); }
+    else {
+      // dozvoli JSON/PDF i sa subdomena istog root-a
+      if (rootHost(host(u)) === rootHost(host(homepage))) {
+        queue.push(u); depthOf.set(u, 0);
+      }
+    }
   }
 
   const pageTexts = [];
   const jsonTexts = [];
+  const apiJsonToFetch = new Set();
   const pageLinks = new Set();
+  const pdfLinks = new Set();
 
   while (queue.length && tried.length < maxPages) {
     const url = queue.shift();
@@ -364,76 +426,108 @@ export async function extractDeepSafety(opt = {}) {
     seen.add(url);
 
     tried.push(url);
-    const res = await fetchText(url, timeoutMs);
+
+    // a) JSON fajl direktno?
+    if (/\.json($|\?)/i.test(url)) {
+      const rj = await fetchText(url, timeoutMs, baseHeaders);
+      if (rj.ok && rj.text) {
+        const obj = safeParseJson(rj.text);
+        if (obj) {
+          sources.add(rj.url);
+          const lines = [];
+          jsonWalkStrings(obj, (s) => { const t=(s||'').trim(); if (t) lines.push(t); });
+          if (lines.length) jsonTexts.push(lines.join(' • '));
+        }
+      }
+      continue;
+    }
+
+    // b) PDF?
+    if (/\.pdf($|\?)/i.test(url)) {
+      sources.add(url);
+      pdfLinks.add(url);
+      continue;
+    }
+
+    // c) HTML
+    const res = await fetchText(url, timeoutMs, baseHeaders);
     if (!res.ok || !res.text) continue;
 
     sources.add(res.url);
-
-    // 1) HTML → plain text
     const html = res.text;
     const txt  = plainText(html);
-    pageTexts.push(txt);
+    if (txt) pageTexts.push(txt);
 
-    // 2) JSON blobovi iz DOM-a
+    // JSON blobs iz HTML-a
     const blobs = extractJsonBlobs(html);
     if (blobs.length) {
       const lines = [];
       for (const b of blobs) {
-        jsonWalkStrings(b, (s) => {
-          const t = (s||'').trim();
-          if (t) lines.push(t);
-        });
+        jsonWalkStrings(b, (s) => { const t=(s||'').trim(); if (t) lines.push(t); });
       }
       if (lines.length) jsonTexts.push(lines.join(' • '));
     }
 
-    // 3) Anchors
-    const anchors = extractAnchors(html, res.url);
-    anchors.forEach(a => { if (sameSite(homepage, a)) pageLinks.add(a); });
+    // nađi dodatne JSON API linkove
+    discoverJsonEndpoints(html, res.url).forEach(u => {
+      if (!seen.has(u)) { apiJsonToFetch.add(u); queue.push(u); depthOf.set(u, depth + 1); }
+    });
 
-    // 4) BFS dalje
+    // linkovi (HTML)
+    const anchors = extractAnchors(html, res.url);
+    anchors.forEach(a => {
+      if (/\.pdf($|\?)/i.test(a)) pdfLinks.add(a);
+      pageLinks.add(a);
+    });
+
+    // BFS
     if (depth < maxDepth) {
       const nextLinks = anchors.filter(u => /regulat|legal|document|disclosure|terms|licen[cs]|compliance/i.test(u));
       for (const n of nextLinks) {
-        if (!seen.has(n) && sameSite(homepage, n)) {
-          queue.push(n);
-          depthOf.set(n, depth + 1);
+        if (!seen.has(n)) {
+          // dozvoli subdomen istog root-a
+          if (rootHost(host(n)) === rootHost(host(homepage))) {
+            queue.push(n);
+            depthOf.set(n, depth + 1);
+          }
         }
       }
     }
   }
 
-  // Agreguj tekst za detekciju (HTML + JSON stringovi)
-  const big = [pageTexts.join(' • '), jsonTexts.join(' • ')].filter(Boolean).join(' • ');
+  // pokušaj PDF teksta (prvih par, da ne bude skupo)
+  let pdfTextAgg = '';
+  if (pdfParse && pdfLinks.size) {
+    const few = Array.from(pdfLinks).slice(0, 2);
+    for (const p of few) {
+      const t = await tryPdfText(p, timeoutMs, baseHeaders);
+      if (t) pdfTextAgg += ' • ' + t;
+    }
+  }
 
-  // 1) Regulatori (iz obe mase teksta)
+  // Agreguj
+  const big = [pageTexts.join(' • '), jsonTexts.join(' • '), pdfTextAgg].filter(Boolean).join(' • ');
+
+  // Detekcije
   const regs = parseRegulators(big);
-
-  // 2) Entiteti
   const entityNames = parseEntities(big);
-
-  // 3) NBP / Kompenzacija
   const nbp = parseNBP(big);
   const invProtect = parseCompensation(big);
 
-  // 4) Dokument linkovi (dozvoli i PDF)
+  // Dokument linkovi
   const linkList = Array.from(pageLinks);
-  const terms_url = pickDocLink(linkList,
-    '.pdf/terms', 'terms-and-conditions', 'terms_of', 'terms', '/terms');
-  const risk_disclosure_url = pickDocLink(linkList,
-    '.pdf/risk', 'risk-disclosure', '/risk', 'risk_disclosure');
-  const client_agreement_url = pickDocLink(linkList,
-    '.pdf/client', 'client-services-agreement', 'client-agreement', 'clientagreement');
+  const terms_url = pickDocLink(linkList, '.pdf/terms', 'terms-and-conditions', 'terms_of', '/terms');
+  const risk_disclosure_url = pickDocLink(linkList, '.pdf/risk', 'risk-disclosure', '/risk', 'risk_disclosure');
+  const client_agreement_url = pickDocLink(linkList, '.pdf/client', 'client-services-agreement', 'client-agreement', 'clientagreement');
   const open_account_url = pickDocLink(linkList, 'open-account', 'register', 'join');
 
-  // 5) Legal entities sparivanje (heuristika)
+  // Legal entities
   const legal_entities = [];
   if (entityNames.length && regs.length) {
     const maxPairs = Math.max(entityNames.length, regs.length);
     for (let i=0;i<maxPairs;i++) {
       const en = entityNames[i % entityNames.length];
       const rg = regs[i % regs.length];
-
       legal_entities.push({
         entity_name: en,
         country_of_clients: inferCountryByReg(rg.abbr),
@@ -478,11 +572,9 @@ export async function extractDeepSafety(opt = {}) {
     }
   }
 
-  // 6) Description/highlights/caveats
   const desc = [];
   if (regs.length) {
-    const regStr = regs.map(r => r.abbr).join(', ');
-    desc.push(`Detected regulators: ${regStr}.`);
+    desc.push(`Detected regulators: ${regs.map(r => r.abbr).join(', ')}.`);
   } else {
     desc.push('Regulatory information detected on legal/compliance pages could not be conclusively resolved.');
   }
@@ -520,5 +612,4 @@ export async function extractDeepSafety(opt = {}) {
   return { ok: true, normalized };
 }
 
-// CommonJS compat
 try { module.exports = { extractDeepSafety }; } catch {}
