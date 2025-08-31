@@ -13,54 +13,17 @@ export const Jobs = new Map();
 function makeJobId() {
   return `tsbar-${Date.now()}-${crypto.randomInt(1e9)}`;
 }
+
 function now() { return Date.now(); }
 
-// ---- helpers ---------------------------------------------------------------
-
-function normalizeHomepage(raw) {
-  let hp = (raw || '').toString().trim();
-  if (!hp) return '';
-  // dodaj protokol ako fali
-  if (!/^https?:\/\//i.test(hp)) hp = 'https://' + hp;
-  try {
-    const u = new URL(hp);
-    // bez trailing slash-a
-    u.pathname = u.pathname.replace(/\/+$/, '');
-    return u.toString();
-  } catch {
-    return hp.replace(/\/+$/, '');
+function normalizeSeeds(raw) {
+  if (Array.isArray(raw)) return raw.filter(Boolean);
+  if (!raw) return [];
+  if (typeof raw === 'string') {
+    return raw.split(',').map(s => s.trim()).filter(Boolean);
   }
+  return [];
 }
-
-function pickHomepage(payload = {}) {
-  const candidates = [
-    payload.homepage,
-    payload.url,
-    payload.website,
-    payload.home,
-    payload.base
-  ];
-  for (const c of candidates) {
-    const n = normalizeHomepage(c);
-    if (n) return n;
-  }
-  return '';
-}
-
-function parseSeeds(payload = {}) {
-  let seeds = payload.seeds ?? payload.seed ?? [];
-  if (typeof seeds === 'string') {
-    seeds = seeds
-      .split(',')
-      .map(s => s.trim())
-      .filter(Boolean);
-  }
-  if (!Array.isArray(seeds)) seeds = [];
-  // osiguraj da su to relativne ili apsolutne putanje bez duplikata
-  return Array.from(new Set(seeds));
-}
-
-// ---- job processor ---------------------------------------------------------
 
 async function processJob(id) {
   const job = Jobs.get(id);
@@ -70,23 +33,18 @@ async function processJob(id) {
   job.state = 'running';
   job.updatedAt = now();
 
-  const { homepage, url, broker, section, seeds } = job.params;
+  const { homepage, broker, section, seeds } = job.params;
 
   try {
-    const ctx = {
+    const out = await orchestrate({
       broker: (broker || '').toLowerCase(),
       section: section || 'safety',
       homepage: homepage || '',
-      url: url || homepage || '',
-      seeds: Array.isArray(seeds) ? seeds : [],
+      seeds: normalizeSeeds(seeds),
       debug: true
-    };
+    });
 
-    // debug u server logu da uvek vidimo šta je stiglo
-    console.log('[RUN] ctx =', ctx);
-
-    const out = await orchestrate(ctx);
-
+    // očekivani oblik: { ok, normalized, acf } bez nestinga
     if (!out?.ok) {
       job.state  = 'failed';
       job.error  = {
@@ -105,10 +63,11 @@ async function processJob(id) {
       ok: true,
       broker: (broker || '').toLowerCase(),
       section: section || 'safety',
-      normalized: out.normalized,
-      acf: out.acf
+      normalized: out.normalized || {},
+      acf: out.acf || {}
     };
     job.updatedAt = now();
+
   } catch (e) {
     job.state  = 'failed';
     job.error  = { ok: false, error: 'internal_error', message: String(e?.message || e) };
@@ -116,36 +75,32 @@ async function processJob(id) {
   }
 }
 
-// ---- routes ----------------------------------------------------------------
-
 router.get('/__routes', (_req, res) => {
-  res.json({ ok: true, routes: ['/run', '/run.js', '/run.json', '/run/deep', '/jobs/:id'] });
+  res.json({ ok: true, routes: ['/run', '/jobs/:id'] });
 });
 
-// zajednički handler za /run i /run/deep
-async function handleRun(req, res) {
+router.all(['/run', '/run.js', '/run.json'], async (req, res) => {
   const q = req.query || {};
   const b = (req.body && typeof req.body === 'object') ? req.body : {};
   const payload = { ...b, ...q };
 
-  const homepage = pickHomepage(payload); // koristi homepage/url/website/home/base
-  const url      = homepage;              // eksplicitno prosleđujemo i url
-  const broker   = (payload.broker || '').toString().trim();
-  const section  = (payload.section || '').toString().trim() || 'safety';
-  const seeds    = parseSeeds(payload);
+  const homepage = (payload.homepage || '').toString().trim();
+  const broker   = (payload.broker   || '').toString().trim();
+  const section  = (payload.section  || '').toString().trim() || 'safety';
+  const seeds    = normalizeSeeds(payload.seeds);
 
-  if (!homepage && !(broker && section)) {
+  if (!homepage && !(broker && section) && seeds.length === 0) {
     return res.status(400).json({
       ok: false,
       error: 'missing_params',
-      hint: 'Provide ?homepage (or url/website) or both ?broker=&section='
+      hint: 'Provide ?homepage or both ?broker=&section= or at least one seed'
     });
   }
 
   const jobId = makeJobId();
   Jobs.set(jobId, {
     state: 'queued',
-    params: { homepage, url, broker, section, seeds },
+    params: { homepage, broker, section, seeds },
     result: null,
     error: null,
     createdAt: now(),
@@ -156,8 +111,41 @@ async function handleRun(req, res) {
   setImmediate(() => processJob(jobId));
 
   return res.json({ ok: true, jobId, status: 'started' });
-}
+});
 
-router.all(['/run', '/run.js', '/run.json', '/run/deep'], handleRun);
+router.get(['/jobs/:id', '/job/:id'], (req, res) => {
+  const id = req.params?.id;
+  if (!id || !Jobs.has(id)) {
+    return res.status(404).json({ ok: false, error: 'job_not_found' });
+  }
+  const job = Jobs.get(id);
+  if (job.state === 'failed') {
+    return res.status(400).json({
+      ok: false,
+      error: null,
+      body: job.error
+    });
+  }
+  if (job.state !== 'succeeded') {
+    return res.json({
+      ok: true,
+      status: job.state,
+      body: { ok: true, status: job.state, updatedAt: job.updatedAt }
+    });
+  }
+  // success
+  return res.json({
+    ok: true,
+    status: 200,
+    error: null,
+    body: {
+      ok: true,
+      broker: job.params?.broker || '',
+      section: job.params?.section || 'safety',
+      normalized: job.result.normalized,
+      acf: job.result.acf
+    }
+  });
+});
 
 export default router;
